@@ -197,6 +197,10 @@ def yahoo_search(query):
         quote_type = quote.get("quoteType") or quote.get("typeDisp") or "Yahoo"
         name = quote.get("shortname") or quote.get("longname") or symbol
         exchange = quote.get("exchDisp") or quote.get("exchange") or ""
+        first_trade_ms = quote.get("firstTradeDateMilliseconds")
+        hint_start = ""
+        if first_trade_ms:
+            hint_start = datetime.fromtimestamp(first_trade_ms / 1000, timezone.utc).date().isoformat()
         dynamic_id = f"Y:{symbol.upper()}"
         items.append(
             {
@@ -206,7 +210,7 @@ def yahoo_search(query):
                 "assetClass": quote_type,
                 "source": "yahoo",
                 "currency": quote.get("currency") or "",
-                "hintStart": "加载中",
+                "hintStart": hint_start,
                 "keywords": f"{symbol} {name} {exchange}",
                 "exchange": exchange,
                 "dynamic": True,
@@ -306,18 +310,27 @@ def fund_search(query, limit=12):
                 "assetClass": row["type"] or "China Fund",
                 "source": "fund_nav_accum",
                 "currency": "CNY",
-                "hintStart": CATALOG_BY_ID.get(row["code"], {}).get("hintStart", "查询中"),
+                "hintStart": CATALOG_BY_ID.get(row["code"], {}).get("hintStart", ""),
                 "keywords": f"{row['code']} {row['name']} {row['abbr']} {row['pinyin']}",
                 "dynamic": item_id.startswith("F:"),
             }
         )
         if len(matched) >= limit:
             break
-    return enrich_fund_start_dates(matched)
+    return matched
 
 
 def should_search_yahoo(query):
     return any("a" <= char <= "z" or "0" <= char <= "9" for char in query.lower())
+
+
+def should_search_funds(query):
+    key = query.strip().lower()
+    if not key:
+        return False
+    if key.isdigit() and 2 <= len(key) <= 6:
+        return True
+    return any("\u4e00" <= char <= "\u9fff" for char in key)
 
 
 def get_dynamic_yahoo_meta(asset_id):
@@ -891,11 +904,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                         yahoo_items = []
                     for item in yahoo_items:
                         if item["id"] not in existing:
-                            items.append(enrich_start(item))
+                            items.append(item)
                             existing.add(item["id"])
                         if len(items) >= 18:
                             break
-                if query:
+                if query and should_search_funds(query):
                     existing = {item["id"] for item in items}
                     try:
                         fund_items = fund_search(query)
