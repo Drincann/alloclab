@@ -424,7 +424,7 @@ function configureAuthHelpLink() {
 }
 
 function showAuthOverlay(message = "") {
-  els.authError.textContent = normalizeErrorMessage(message);
+  els.authError.textContent = message ? normalizeErrorMessage(message) : "";
   els.authSubmitBtn.disabled = false;
   els.authSubmitBtn.textContent = t("verify");
   els.authOverlay.classList.add("active");
