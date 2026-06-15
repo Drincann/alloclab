@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AllocLab</title>
+    <link rel="stylesheet" href="/styles.css?v=20260616-repo" />
+  </head>
+  <body>
+    <div id="authOverlay" class="auth-overlay">
+      <form id="authForm" class="auth-panel">
+        <h2 data-i18n="authTitle">需要访问密钥</h2>
+        <p data-i18n="authDescription">请输入访问密钥后继续使用组合回测。</p>
+        <input id="authKeyInput" type="password" autocomplete="current-password" placeholder="访问密钥" data-i18n-placeholder="authPlaceholder" />
+        <button id="authSubmitBtn" class="primary-btn" type="submit" data-i18n="verify">验证</button>
+        <div id="authError" class="auth-error"></div>
+        <a id="authHelpLink" href="#" target="_blank" rel="noreferrer" data-i18n="getKey">获取密钥</a>
+      </form>
+    </div>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-head">
+            <h1 data-i18n="appName">AllocLab</h1>
+            <button id="runBtn" class="primary-btn" type="button" data-i18n="run">运行</button>
+          </div>
+          <div class="search-box">
+            <input id="searchInput" type="search" placeholder="搜索代码 / 指数 / ETF / 基金" data-i18n-placeholder="searchPlaceholder" />
+            <div id="searchResults" class="search-results"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span data-i18n="assets">标的</span>
+            <button id="normalizeBtn" type="button" class="ghost-btn" data-i18n="normalize">归一化</button>
+          </div>
+          <div id="assetList" class="asset-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span data-i18n="favorites">收藏组合</span>
+            <button id="saveFavoriteBtn" type="button" class="ghost-btn" data-i18n="save">保存</button>
+          </div>
+          <input id="favoriteNameInput" class="favorite-name" type="text" placeholder="组合名称" data-i18n-placeholder="favoriteName" />
+          <div id="favoriteList" class="favorite-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span data-i18n="rebalance">再平衡</span>
+          </div>
+          <div class="segmented" id="rebalanceModes">
+            <button data-mode="none" type="button" data-i18n="rebalanceNone">不再平衡</button>
+            <button data-mode="monthly" type="button" data-i18n="rebalanceMonthly">每月</button>
+            <button data-mode="quarterly" type="button" data-i18n="rebalanceQuarterly">每季</button>
+            <button data-mode="annual" type="button" data-i18n="rebalanceAnnual">每年</button>
+            <button data-mode="threshold" type="button" data-i18n="rebalanceThreshold">阈值</button>
+          </div>
+          <label class="field-row">
+            <span data-i18n="threshold">阈值</span>
+            <input id="thresholdInput" type="number" min="1" max="50" step="1" value="20" />
+            <span>%</span>
+          </label>
+          <div class="date-grid">
+            <label>
+              <span data-i18n="start">开始</span>
+              <input id="startInput" type="date" />
+            </label>
+            <label>
+              <span data-i18n="end">结束</span>
+              <input id="endInput" type="date" />
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span data-i18n="optimize">参数优化</span>
+            <button id="optimizeBtn" type="button" class="ghost-btn" data-i18n="scan">扫描</button>
+          </div>
+          <div id="optimizerResults" class="optimizer-list"></div>
+        </section>
+      </aside>
+
+      <section class="main-area">
+        <div class="topbar">
+          <div>
+            <h2 id="chartTitle" data-i18n="equityCurve">净值曲线</h2>
+            <div id="rangeLabel" class="muted"></div>
+          </div>
+          <div class="interface-actions">
+            <div class="compact-toggle lang-toggle" id="languageModes" aria-label="Language">
+              <button data-lang="zh" type="button" title="中文">中</button>
+              <button data-lang="en" type="button" title="English">EN</button>
+            </div>
+            <button id="themeToggleBtn" class="theme-toggle-btn" type="button" aria-label="深色" title="深色">☀</button>
+          </div>
+        </div>
+
+        <div class="chart-control-bar">
+          <div class="chart-control-group">
+            <span class="toolbar-label" data-i18n="scaleGroup">坐标</span>
+            <div class="scale-toggle" id="chartScaleModes" aria-label="坐标类型" data-i18n-aria-label="scaleType">
+              <button data-scale="linear" type="button" data-i18n="linearScale">普通</button>
+              <button data-scale="log" type="button" data-i18n="logScale">指数</button>
+            </div>
+          </div>
+          <button id="resetZoomBtn" type="button" class="ghost-btn" data-i18n="resetRange">重置区间</button>
+        </div>
+
+        <section class="chart-panel">
+          <canvas id="equityCanvas" width="1200" height="560"></canvas>
+          <div id="tooltip" class="tooltip"></div>
+        </section>
+
+        <section class="metrics-grid" id="metricsGrid"></section>
+
+        <section class="lower-grid">
+          <div class="panel">
+            <div class="panel-title">
+              <span data-i18n="correlation">相关性</span>
+            </div>
+            <div id="corrMatrix" class="corr-matrix"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">
+              <span data-i18n="rebalanceRecords">再平衡记录</span>
+            </div>
+            <div id="rebalanceTable" class="event-table"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script>
+      window.PORTFOLIO_KEY_HELP_URL = __PORTFOLIO_KEY_HELP_URL__;
+    </script>
+    <script src="/app.js?v=20260616-repo"></script>
+  </body>
+</html>
