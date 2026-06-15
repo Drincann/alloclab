@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: alloclab
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /
+    envVars:
+      - key: ALLOCLAB_HOST
+        value: 0.0.0.0
+      - key: ALLOCLAB_ACCESS_KEY
+        sync: false
