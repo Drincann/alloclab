@@ -3,6 +3,7 @@ import hmac
 import math
 import os
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -132,6 +133,8 @@ SERIES_CACHE = {}
 SEARCH_CACHE = {}
 OPTIMIZE_CACHE = {}
 FUND_LIST_CACHE = None
+FUND_LIST_LOADING = False
+FUND_LIST_ERROR = None
 FUND_START_CACHE = {}
 ACCESS_KEY_ENV = "ALLOCLAB_ACCESS_KEY"
 KEY_HELP_URL_ENV = "ALLOCLAB_KEY_HELP_URL"
@@ -227,30 +230,62 @@ def yahoo_search(query):
 
 
 def fund_catalog():
-    global FUND_LIST_CACHE
+    global FUND_LIST_CACHE, FUND_LIST_ERROR
     if FUND_LIST_CACHE is not None:
         return FUND_LIST_CACHE
     if ak is None:
         FUND_LIST_CACHE = []
         return FUND_LIST_CACHE
-    df = ak.fund_name_em()
-    rows = []
-    for _, row in df.iterrows():
-        code = str(row.get("基金代码", "")).strip()
-        name = str(row.get("基金简称", "")).strip()
-        if not code or not name:
-            continue
-        rows.append(
-            {
-                "code": code,
-                "name": name,
-                "type": str(row.get("基金类型", "")).strip(),
-                "abbr": str(row.get("拼音缩写", "")).strip(),
-                "pinyin": str(row.get("拼音全称", "")).strip(),
-            }
-        )
-    FUND_LIST_CACHE = rows
+    started = time.time()
+    try:
+        df = ak.fund_name_em()
+        rows = []
+        for _, row in df.iterrows():
+            code = str(row.get("基金代码", "")).strip()
+            name = str(row.get("基金简称", "")).strip()
+            if not code or not name:
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "type": str(row.get("基金类型", "")).strip(),
+                    "abbr": str(row.get("拼音缩写", "")).strip(),
+                    "pinyin": str(row.get("拼音全称", "")).strip(),
+                }
+            )
+        FUND_LIST_CACHE = rows
+        FUND_LIST_ERROR = None
+        log_event("fund_catalog.loaded", count=len(rows), elapsed_ms=int((time.time() - started) * 1000))
+    except Exception as exc:
+        FUND_LIST_CACHE = []
+        FUND_LIST_ERROR = type(exc).__name__
+        log_event("fund_catalog.error", error=type(exc).__name__, elapsed_ms=int((time.time() - started) * 1000))
     return FUND_LIST_CACHE
+
+
+def start_fund_catalog_load():
+    global FUND_LIST_LOADING
+    if FUND_LIST_CACHE is not None or FUND_LIST_LOADING or ak is None:
+        return
+    FUND_LIST_LOADING = True
+
+    def load():
+        global FUND_LIST_LOADING
+        try:
+            fund_catalog()
+        finally:
+            FUND_LIST_LOADING = False
+
+    threading.Thread(target=load, name="fund-catalog-load", daemon=True).start()
+    log_event("fund_catalog.loading")
+
+
+def fund_catalog_if_ready():
+    if FUND_LIST_CACHE is not None:
+        return FUND_LIST_CACHE
+    start_fund_catalog_load()
+    return None
 
 
 def fetch_fund_start_date(code):
@@ -302,8 +337,25 @@ def fund_search(query, limit=12):
     key = query.lower().strip()
     if not key:
         return []
+    catalog = fund_catalog_if_ready()
+    if catalog is None:
+        if key.isdigit() and len(key) == 6:
+            return [
+                {
+                    "id": key if key in CATALOG_BY_ID else f"F:{key}",
+                    "symbol": key,
+                    "name": f"{key} 累计净值",
+                    "assetClass": "China Fund",
+                    "source": "fund_nav_accum",
+                    "currency": "CNY",
+                    "hintStart": CATALOG_BY_ID.get(key, {}).get("hintStart", ""),
+                    "keywords": key,
+                    "dynamic": key not in CATALOG_BY_ID,
+                }
+            ]
+        return []
     matched = []
-    for row in fund_catalog():
+    for row in catalog:
         haystack = f"{row['code']} {row['name']} {row['type']} {row['abbr']} {row['pinyin']}".lower()
         if key not in haystack:
             continue
@@ -934,11 +986,14 @@ class AppHandler(SimpleHTTPRequestHandler):
                     existing = {item["id"] for item in items}
                     fund_started = time.time()
                     try:
+                        fund_ready = FUND_LIST_CACHE is not None
                         fund_items = fund_search(query)
                         log_event(
                             "search.fund.done",
                             query=query,
                             count=len(fund_items),
+                            ready=fund_ready,
+                            loading=FUND_LIST_LOADING,
                             elapsed_ms=int((time.time() - fund_started) * 1000),
                         )
                     except Exception as exc:
@@ -1015,6 +1070,7 @@ def main():
     host = os.environ.get("ALLOCLAB_HOST") or os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("ALLOCLAB_PORT") or os.environ.get("PORT", "8765"))
     server = ThreadingHTTPServer((host, port), AppHandler)
+    start_fund_catalog_load()
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
     print(f"AllocLab running at http://{display_host}:{port} (bind {host}:{port})")
     server.serve_forever()

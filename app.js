@@ -10,6 +10,7 @@ const state = {
   selection: null,
   hoverIndex: null,
   loading: false,
+  pendingBacktestResetView: null,
   optimizing: false,
   optimizerProfiles: [],
   favorites: [],
@@ -42,6 +43,7 @@ const els = {
   modes: document.getElementById("rebalanceModes"),
   canvas: document.getElementById("equityCanvas"),
   tooltip: document.getElementById("tooltip"),
+  chartLoading: document.getElementById("chartLoading"),
   metricsGrid: document.getElementById("metricsGrid"),
   corrMatrix: document.getElementById("corrMatrix"),
   rebalanceTable: document.getElementById("rebalanceTable"),
@@ -64,6 +66,7 @@ const THEME_KEY = "portfolioLabTheme.v1";
 let debounceTimer = null;
 let searchDebounceTimer = null;
 let searchRequestSeq = 0;
+let searchAbortController = null;
 
 const I18N = {
   zh: {
@@ -77,6 +80,7 @@ const I18N = {
     getKey: "获取密钥",
     run: "运行",
     running: "运行中",
+    backtesting: "回测中",
     searchPlaceholder: "搜索代码 / 指数 / ETF / 基金",
     assets: "标的",
     normalize: "归一化",
@@ -182,6 +186,7 @@ const I18N = {
     getKey: "Get key",
     run: "Run",
     running: "Running",
+    backtesting: "Backtesting",
     searchPlaceholder: "Search ticker / index / ETF / fund",
     assets: "Assets",
     normalize: "Normalize",
@@ -399,6 +404,7 @@ function rerenderLocalizedContent() {
   } else if (state.bootstrapped) {
     els.chartTitle.textContent = t("equityCurve");
   }
+  updateInteractionLocks();
 }
 
 function storedAccessKey() {
@@ -685,32 +691,45 @@ async function loadCatalog() {
 
 async function renderSearch(query, options = {}) {
   const requestSeq = ++searchRequestSeq;
+  if (searchAbortController) {
+    searchAbortController.abort();
+    searchAbortController = null;
+  }
   const previousScrollTop = options.preserveScroll ? els.searchResults.scrollTop : 0;
   const q = query.trim().toLowerCase();
   const selected = new Set(state.assets.map((asset) => asset.id));
   let items = [];
+  const controller = q ? new AbortController() : null;
+  if (controller) {
+    searchAbortController = controller;
+  }
   if (q) {
     els.searchResults.innerHTML = `<div class="status">${t("searching")}</div>`;
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+      const data = await api(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
       if (requestSeq !== searchRequestSeq) return;
       items = data.items;
       mergeCatalogItems(items);
     } catch (error) {
-      if (requestSeq !== searchRequestSeq) return;
+      if (error.name === "AbortError" || requestSeq !== searchRequestSeq) return;
       els.searchResults.innerHTML = `<div class="status error">${error.message}</div>`;
       return;
+    } finally {
+      if (searchAbortController === controller) {
+        searchAbortController = null;
+      }
     }
   } else {
     items = state.catalog.slice(0, 12);
   }
+  if (requestSeq !== searchRequestSeq) return;
   els.searchResults.innerHTML = "";
   for (const item of items) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "search-result";
     button.dataset.assetId = item.id;
-    button.disabled = selected.has(item.id);
+    button.disabled = state.loading || selected.has(item.id);
     button.innerHTML = `
       <div>
         <strong>${escapeHtml(item.id)} · ${escapeHtml(item.name)}</strong>
@@ -730,13 +749,14 @@ function refreshSearchSelectionState() {
   const selected = new Set(state.assets.map((asset) => asset.id));
   for (const button of els.searchResults.querySelectorAll(".search-result")) {
     const isSelected = selected.has(button.dataset.assetId);
-    button.disabled = isSelected;
+    button.disabled = state.loading || isSelected;
     const label = button.querySelector("span");
     if (label) label.textContent = isSelected ? t("added") : t("add");
   }
 }
 
 function addAsset(id) {
+  if (state.loading) return;
   if (state.assets.some((asset) => asset.id === id)) return;
   state.assets.push({ id, weight: Math.round(100 / (state.assets.length + 1)) });
   preserveScroll(() => {
@@ -748,6 +768,7 @@ function addAsset(id) {
 }
 
 function removeAsset(id) {
+  if (state.loading) return;
   if (state.assets.length <= 1) return;
   state.assets = state.assets.filter((asset) => asset.id !== id);
   preserveScroll(() => {
@@ -782,6 +803,8 @@ function renderAssets() {
       <input type="number" min="0" step="1" value="${Number(asset.weight).toFixed(0)}" />
       <button class="icon-btn" type="button" title="${t("remove")}">×</button>
     `;
+    row.querySelector("input").disabled = state.loading;
+    row.querySelector("button").disabled = state.loading;
     row.querySelector("input").addEventListener("input", (event) => {
       asset.weight = Number(event.target.value);
       saveState();
@@ -813,6 +836,9 @@ function renderFavorites() {
       <button class="ghost-btn" type="button">${t("apply")}</button>
       <button class="icon-btn" type="button" title="${t("delete")}">×</button>
     `;
+    for (const button of row.querySelectorAll("button")) {
+      button.disabled = state.loading;
+    }
     row.querySelector(".ghost-btn").addEventListener("click", () => applyFavorite(favorite.id));
     row.querySelector(".icon-btn").addEventListener("click", () => deleteFavorite(favorite.id));
     els.favoriteList.appendChild(row);
@@ -834,6 +860,7 @@ function saveFavorite() {
 }
 
 function applyFavorite(id) {
+  if (state.loading) return;
   const favorite = state.favorites.find((item) => item.id === id);
   if (!favorite) return;
   mergeCatalogItems(favorite.catalog);
@@ -859,6 +886,7 @@ function applyFavorite(id) {
 }
 
 function deleteFavorite(id) {
+  if (state.loading) return;
   state.favorites = state.favorites.filter((item) => item.id !== id);
   preserveScroll(renderFavorites);
   saveState();
@@ -867,8 +895,9 @@ function deleteFavorite(id) {
 function renderModes() {
   for (const button of els.modes.querySelectorAll("button")) {
     button.classList.toggle("active", button.dataset.mode === state.rebalance.mode);
+    button.disabled = state.loading;
   }
-  els.thresholdInput.disabled = state.rebalance.mode !== "threshold";
+  els.thresholdInput.disabled = state.loading || state.rebalance.mode !== "threshold";
 }
 
 function renderScaleMode() {
@@ -895,6 +924,36 @@ function setStatus(text, isError = false) {
   }
 }
 
+function updateInteractionLocks() {
+  const busy = state.loading;
+  els.runBtn.disabled = busy;
+  els.runBtn.textContent = busy ? t("running") : t("run");
+  els.normalizeBtn.disabled = busy;
+  els.startInput.disabled = busy;
+  els.endInput.disabled = busy;
+  els.resetZoomBtn.disabled = busy || !state.result;
+  els.optimizeBtn.disabled = busy || state.optimizing;
+  els.optimizeBtn.textContent = state.optimizing ? t("scanning") : t("scan");
+  if (els.chartLoading) {
+    els.chartLoading.textContent = t("backtesting");
+    els.chartLoading.classList.toggle("active", busy);
+  }
+  renderModes();
+  refreshSearchSelectionState();
+  for (const input of els.assetList.querySelectorAll("input")) {
+    input.disabled = busy;
+  }
+  for (const button of els.assetList.querySelectorAll("button")) {
+    button.disabled = busy;
+  }
+  for (const button of els.favoriteList.querySelectorAll("button")) {
+    button.disabled = busy;
+  }
+  for (const button of els.optimizerResults.querySelectorAll("button")) {
+    button.disabled = busy || state.optimizing;
+  }
+}
+
 function syncVisibleSeries(result) {
   if (typeof state.visibleSeries.portfolio !== "boolean") {
     state.visibleSeries.portfolio = true;
@@ -907,38 +966,54 @@ function syncVisibleSeries(result) {
 }
 
 async function runBacktest(resetView = true) {
-  if (state.assets.length < 1 || state.loading) return;
+  if (state.assets.length < 1) return;
+  if (state.loading) {
+    state.pendingBacktestResetView = resetView;
+    updateInteractionLocks();
+    return;
+  }
   const scrollSnapshot = captureScrollState();
   state.loading = true;
-  els.runBtn.textContent = t("running");
-  saveState();
-  try {
-    const result = await api("/api/backtest", {
-      method: "POST",
-      body: JSON.stringify(requestPayload()),
-    });
-    state.result = result;
-    syncVisibleSeries(result);
-    mergeCatalogItems(result.assets);
+  state.pendingBacktestResetView = null;
+  updateInteractionLocks();
+  while (true) {
+    const shouldResetView = resetView;
     saveState();
-    if (resetView || !state.view) {
-      state.view = { start: 0, end: result.dates.length - 1 };
-    } else {
-      state.view.end = Math.min(state.view.end, result.dates.length - 1);
+    try {
+      const result = await api("/api/backtest", {
+        method: "POST",
+        body: JSON.stringify(requestPayload()),
+      });
+      state.result = result;
+      syncVisibleSeries(result);
+      mergeCatalogItems(result.assets);
+      saveState();
+      if (shouldResetView || !state.view) {
+        state.view = { start: 0, end: result.dates.length - 1 };
+      } else {
+        state.view.end = Math.min(state.view.end, result.dates.length - 1);
+      }
+      renderAll();
+      restoreScrollState(scrollSnapshot);
+    } catch (error) {
+      els.metricsGrid.innerHTML = `<div class="status error">${error.message}</div>`;
+      restoreScrollState(scrollSnapshot);
+      if (error.status === 401) {
+        state.loading = false;
+        state.pendingBacktestResetView = null;
+        updateInteractionLocks();
+        throw error;
+      }
     }
-    renderAll();
-    restoreScrollState(scrollSnapshot);
-  } catch (error) {
-    els.metricsGrid.innerHTML = `<div class="status error">${error.message}</div>`;
-    restoreScrollState(scrollSnapshot);
-    if (error.status === 401) {
-      throw error;
+    if (state.pendingBacktestResetView === null) {
+      break;
     }
-  } finally {
-    state.loading = false;
-    els.runBtn.textContent = t("run");
-    restoreScrollState(scrollSnapshot);
+    resetView = state.pendingBacktestResetView;
+    state.pendingBacktestResetView = null;
   }
+  state.loading = false;
+  updateInteractionLocks();
+  restoreScrollState(scrollSnapshot);
 }
 
 function renderAll() {
@@ -1397,11 +1472,10 @@ function hideTooltip() {
 }
 
 async function optimize() {
-  if (state.assets.length < 2 || state.optimizing) return;
+  if (state.assets.length < 2 || state.loading || state.optimizing) return;
   const scrollSnapshot = captureScrollState();
   state.optimizing = true;
-  els.optimizeBtn.disabled = true;
-  els.optimizeBtn.textContent = t("scanning");
+  updateInteractionLocks();
   els.optimizerResults.innerHTML = `<div class="status">${t("scanning")}</div>`;
   restoreScrollState(scrollSnapshot);
   try {
@@ -1416,8 +1490,7 @@ async function optimize() {
     restoreScrollState(scrollSnapshot);
   } finally {
     state.optimizing = false;
-    els.optimizeBtn.disabled = false;
-    els.optimizeBtn.textContent = t("scan");
+    updateInteractionLocks();
     restoreScrollState(scrollSnapshot);
   }
 }
@@ -1451,7 +1524,9 @@ function renderOptimizer(profiles) {
       </div>
       <button type="button">${t("apply")}</button>
     `;
+    card.querySelector("button").disabled = state.loading || state.optimizing;
     card.querySelector("button").addEventListener("click", () => {
+      if (state.loading || state.optimizing) return;
       const scrollSnapshot = captureScrollState();
       profile.weights.forEach((weight, i) => {
         state.assets[i].weight = weight * 100;
@@ -1504,12 +1579,14 @@ function bindEvents() {
   });
   els.runBtn.addEventListener("click", () => runBacktest(true));
   els.normalizeBtn.addEventListener("click", () => {
+    if (state.loading) return;
     normalizeWeights();
     preserveScroll(renderAssets);
     saveState();
     scheduleRun();
   });
   els.thresholdInput.addEventListener("input", () => {
+    if (state.loading) return;
     state.rebalance.threshold = Number(els.thresholdInput.value || 10) / 100;
     saveState();
     scheduleRun();
@@ -1523,6 +1600,7 @@ function bindEvents() {
     runBacktest(true);
   });
   els.modes.addEventListener("click", (event) => {
+    if (state.loading) return;
     const button = event.target.closest("button[data-mode]");
     if (!button) return;
     state.rebalance.mode = button.dataset.mode;
@@ -1556,7 +1634,7 @@ function bindEvents() {
   });
   els.optimizeBtn.addEventListener("click", optimize);
   els.resetZoomBtn.addEventListener("click", () => {
-    if (!state.result) return;
+    if (!state.result || state.loading) return;
     const hasDateRange = Boolean(els.startInput.value || els.endInput.value);
     els.startInput.value = "";
     els.endInput.value = "";
@@ -1571,6 +1649,7 @@ function bindEvents() {
   window.addEventListener("resize", renderChart);
 
   els.canvas.addEventListener("mousedown", (event) => {
+    if (state.loading) return;
     const rect = els.canvas.getBoundingClientRect();
     state.selection = { x0: event.clientX - rect.left, x1: event.clientX - rect.left };
     els.tooltip.style.display = "none";

@@ -192,6 +192,12 @@ button:hover {
   border-color: var(--button-hover-border);
 }
 
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 390px minmax(0, 1fr);
@@ -620,6 +626,24 @@ h2 {
   font-size: 12px;
   line-height: 1.5;
   z-index: 4;
+}
+
+.chart-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--canvas-bg) 72%, transparent);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.chart-loading.active {
+  display: flex;
 }
 
 .chart-legend {

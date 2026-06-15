@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AllocLab</title>
-    <link rel="stylesheet" href="/styles.css?v=20260616-mobile" />
+    <link rel="stylesheet" href="/styles.css?v=20260616-busy" />
   </head>
   <body>
     <div id="authOverlay" class="auth-overlay">
@@ -113,6 +113,7 @@
         <section class="chart-panel">
           <canvas id="equityCanvas" width="1200" height="560"></canvas>
           <div id="tooltip" class="tooltip"></div>
+          <div id="chartLoading" class="chart-loading" aria-live="polite" data-i18n="backtesting">回测中</div>
         </section>
 
         <section class="metrics-grid" id="metricsGrid"></section>
@@ -136,6 +137,6 @@
     <script>
       window.PORTFOLIO_KEY_HELP_URL = __PORTFOLIO_KEY_HELP_URL__;
     </script>
-    <script src="/app.js?v=20260616-mobile"></script>
+    <script src="/app.js?v=20260616-busy"></script>
   </body>
 </html>
