@@ -95,6 +95,12 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -172,6 +178,7 @@ button,
 input,
 select {
   font: inherit;
+  min-width: 0;
 }
 
 button {
@@ -201,6 +208,12 @@ button:hover {
 
 .main-area {
   padding: 16px;
+  min-width: 0;
+}
+
+.sidebar,
+.panel,
+.chart-panel {
   min-width: 0;
 }
 
@@ -574,6 +587,10 @@ h2 {
   margin-bottom: 4px;
 }
 
+.date-grid label {
+  min-width: 0;
+}
+
 .topbar {
   margin-bottom: 12px;
 }
@@ -832,6 +849,28 @@ h2 {
     padding: 10px;
   }
 
+  .panel {
+    padding: 10px;
+  }
+
+  .panel-head,
+  .panel-title,
+  .topbar,
+  .chart-control-bar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .topbar > div:first-child,
+  .chart-control-group {
+    min-width: 0;
+  }
+
+  .interface-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
   .metrics-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -842,5 +881,61 @@ h2 {
 
   .chart-panel {
     height: 470px;
+  }
+}
+
+@media (max-width: 430px) {
+  .search-result,
+  .favorite-row,
+  .asset-row {
+    gap: 6px;
+  }
+
+  .favorite-row {
+    grid-template-columns: minmax(0, 1fr) 52px 30px;
+  }
+
+  .asset-row {
+    grid-template-columns: minmax(0, 1fr) 64px 30px;
+  }
+
+  .asset-row input {
+    width: 64px;
+  }
+
+  .segmented button {
+    min-width: 0;
+    padding: 0 4px;
+  }
+
+  .field-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .field-row input {
+    width: 100%;
+  }
+
+  .date-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .date-grid input {
+    max-width: 100%;
+  }
+
+  .chart-control-bar {
+    gap: 8px;
+  }
+
+  .chart-control-group,
+  .chart-control-bar .ghost-btn {
+    width: 100%;
+  }
+
+  .scale-toggle {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex: 1;
   }
 }
