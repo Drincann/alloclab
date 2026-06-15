@@ -129,6 +129,7 @@ CATALOG = [
 ]
 
 CATALOG_BY_ID = {item["id"]: item for item in CATALOG}
+FUND_CATALOG_PATH = APP_DIR / "data" / "fund_catalog.json"
 SERIES_CACHE = {}
 SEARCH_CACHE = {}
 OPTIMIZE_CACHE = {}
@@ -229,31 +230,79 @@ def yahoo_search(query):
     return items
 
 
+def load_fund_catalog_seed():
+    global FUND_LIST_CACHE, FUND_LIST_ERROR
+    if FUND_LIST_CACHE is not None:
+        return FUND_LIST_CACHE
+    if not FUND_CATALOG_PATH.exists():
+        return None
+    started = time.time()
+    try:
+        rows = json.loads(FUND_CATALOG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(rows, list):
+            raise ValueError("fund catalog seed must be a list")
+        FUND_LIST_CACHE = [
+            {
+                "code": str(row.get("code", "")).strip(),
+                "name": str(row.get("name", "")).strip(),
+                "type": str(row.get("type", "")).strip(),
+                "abbr": str(row.get("abbr", "")).strip(),
+                "pinyin": str(row.get("pinyin", "")).strip(),
+            }
+            for row in rows
+            if row.get("code") and row.get("name")
+        ]
+        FUND_LIST_ERROR = None
+        log_event(
+            "fund_catalog.seed_loaded",
+            count=len(FUND_LIST_CACHE),
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
+        return FUND_LIST_CACHE
+    except Exception as exc:
+        FUND_LIST_ERROR = type(exc).__name__
+        log_event(
+            "fund_catalog.seed_error",
+            error=type(exc).__name__,
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
+        return None
+
+
+def fetch_fund_catalog_remote():
+    if ak is None:
+        return []
+    started = time.time()
+    df = ak.fund_name_em()
+    rows = []
+    for _, row in df.iterrows():
+        code = str(row.get("基金代码", "")).strip()
+        name = str(row.get("基金简称", "")).strip()
+        if not code or not name:
+            continue
+        rows.append(
+            {
+                "code": code,
+                "name": name,
+                "type": str(row.get("基金类型", "")).strip(),
+                "abbr": str(row.get("拼音缩写", "")).strip(),
+                "pinyin": str(row.get("拼音全称", "")).strip(),
+            }
+        )
+    log_event("fund_catalog.remote_fetched", count=len(rows), elapsed_ms=int((time.time() - started) * 1000))
+    return rows
+
+
 def fund_catalog():
     global FUND_LIST_CACHE, FUND_LIST_ERROR
     if FUND_LIST_CACHE is not None:
         return FUND_LIST_CACHE
-    if ak is None:
-        FUND_LIST_CACHE = []
-        return FUND_LIST_CACHE
+    seed_rows = load_fund_catalog_seed()
+    if seed_rows is not None:
+        return seed_rows
     started = time.time()
     try:
-        df = ak.fund_name_em()
-        rows = []
-        for _, row in df.iterrows():
-            code = str(row.get("基金代码", "")).strip()
-            name = str(row.get("基金简称", "")).strip()
-            if not code or not name:
-                continue
-            rows.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "type": str(row.get("基金类型", "")).strip(),
-                    "abbr": str(row.get("拼音缩写", "")).strip(),
-                    "pinyin": str(row.get("拼音全称", "")).strip(),
-                }
-            )
+        rows = fetch_fund_catalog_remote()
         FUND_LIST_CACHE = rows
         FUND_LIST_ERROR = None
         log_event("fund_catalog.loaded", count=len(rows), elapsed_ms=int((time.time() - started) * 1000))
@@ -266,14 +315,31 @@ def fund_catalog():
 
 def start_fund_catalog_load():
     global FUND_LIST_LOADING
-    if FUND_LIST_CACHE is not None or FUND_LIST_LOADING or ak is None:
+    if FUND_LIST_LOADING or ak is None:
         return
+    load_fund_catalog_seed()
     FUND_LIST_LOADING = True
 
     def load():
-        global FUND_LIST_LOADING
+        global FUND_LIST_CACHE, FUND_LIST_ERROR, FUND_LIST_LOADING
+        started = time.time()
         try:
-            fund_catalog()
+            rows = fetch_fund_catalog_remote()
+            if rows:
+                FUND_LIST_CACHE = rows
+                FUND_LIST_ERROR = None
+            log_event(
+                "fund_catalog.refresh_done",
+                count=len(rows),
+                elapsed_ms=int((time.time() - started) * 1000),
+            )
+        except Exception as exc:
+            FUND_LIST_ERROR = type(exc).__name__
+            log_event(
+                "fund_catalog.refresh_error",
+                error=type(exc).__name__,
+                elapsed_ms=int((time.time() - started) * 1000),
+            )
         finally:
             FUND_LIST_LOADING = False
 
@@ -284,6 +350,9 @@ def start_fund_catalog_load():
 def fund_catalog_if_ready():
     if FUND_LIST_CACHE is not None:
         return FUND_LIST_CACHE
+    seed_rows = load_fund_catalog_seed()
+    if seed_rows is not None:
+        return seed_rows
     start_fund_catalog_load()
     return None
 
