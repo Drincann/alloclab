@@ -144,6 +144,12 @@ AUTH_LOCKS = {}
 AUTH_ERROR = {"error": "访问密钥无效或尝试次数过多"}
 
 
+def log_event(event, **fields):
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    detail = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(f"[alloclab] {timestamp} {event} {detail}".rstrip(), flush=True)
+
+
 def http_get_json(url, headers=None, timeout=30):
     req = urllib.request.Request(
         url,
@@ -882,7 +888,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             if parsed.path.startswith("/api/") and not require_api_key(self):
                 return
             if parsed.path == "/api/search":
+                started = time.time()
                 query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].lower().strip()
+                log_event("search.start", query=query or "-", yahoo=should_search_yahoo(query), funds=should_search_funds(query))
                 items = []
                 for item in CATALOG:
                     haystack = " ".join(
@@ -896,11 +904,25 @@ class AppHandler(SimpleHTTPRequestHandler):
                     ).lower()
                     if not query or query in haystack:
                         items.append({k: v for k, v in item.items() if k != "keywords"})
+                log_event("search.local", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
                 if query and should_search_yahoo(query):
                     existing = {item["id"] for item in items}
+                    yahoo_started = time.time()
                     try:
                         yahoo_items = yahoo_search(query)
-                    except Exception:
+                        log_event(
+                            "search.yahoo.done",
+                            query=query,
+                            count=len(yahoo_items),
+                            elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                        )
+                    except Exception as exc:
+                        log_event(
+                            "search.yahoo.error",
+                            query=query,
+                            error=type(exc).__name__,
+                            elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                        )
                         yahoo_items = []
                     for item in yahoo_items:
                         if item["id"] not in existing:
@@ -910,9 +932,22 @@ class AppHandler(SimpleHTTPRequestHandler):
                             break
                 if query and should_search_funds(query):
                     existing = {item["id"] for item in items}
+                    fund_started = time.time()
                     try:
                         fund_items = fund_search(query)
-                    except Exception:
+                        log_event(
+                            "search.fund.done",
+                            query=query,
+                            count=len(fund_items),
+                            elapsed_ms=int((time.time() - fund_started) * 1000),
+                        )
+                    except Exception as exc:
+                        log_event(
+                            "search.fund.error",
+                            query=query,
+                            error=type(exc).__name__,
+                            elapsed_ms=int((time.time() - fund_started) * 1000),
+                        )
                         fund_items = []
                     for item in fund_items:
                         if item["id"] not in existing:
@@ -920,6 +955,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                             existing.add(item["id"])
                         if len(items) >= 24:
                             break
+                log_event("search.done", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
                 json_response(self, {"items": [{k: v for k, v in item.items() if k != "keywords"} for item in items]})
                 return
             if parsed.path == "/api/catalog":
