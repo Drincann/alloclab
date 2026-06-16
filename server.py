@@ -147,6 +147,7 @@ DATA_UNAVAILABLE_HINT = "不可用"
 DATA_UNAVAILABLE_REASON = "行情不可用"
 INSUFFICIENT_DATA_REASON = "数据不足"
 MAX_MARKET_START_DRIFT_DAYS = 365 * 2
+MAX_SERIES_GAP_DAYS = 21
 BITCOIN_YAHOO_FALLBACKS = [
     {"symbol": "BTC-USD", "name": "Bitcoin USD", "assetClass": "CRYPTOCURRENCY", "currency": "USD"},
     {"symbol": "BTC=F", "name": "Bitcoin Futures", "assetClass": "FUTURE", "currency": "USD"},
@@ -255,6 +256,33 @@ def fetch_yahoo(symbol):
         raise yahoo_exc
 
 
+def series_quality_warnings(rows, expected_start=""):
+    warnings = []
+    if not rows:
+        return ["no_data"]
+
+    if expected_start and _series_starts_too_late("", rows, expected_start):
+        warnings.append("start_late")
+
+    max_gap = 0
+    max_gap_start = ""
+    max_gap_end = ""
+    for prev, current in zip(rows, rows[1:]):
+        try:
+            gap = (datetime.fromisoformat(current["date"]) - datetime.fromisoformat(prev["date"])).days
+        except Exception:
+            continue
+        if gap > max_gap:
+            max_gap = gap
+            max_gap_start = prev["date"]
+            max_gap_end = current["date"]
+
+    if max_gap > MAX_SERIES_GAP_DAYS:
+        warnings.append("large_gap")
+        log_event("market.series.large_gap", gap_days=max_gap, start=max_gap_start, end=max_gap_end)
+    return warnings
+
+
 def yahoo_search(query):
     if not query:
         return []
@@ -276,8 +304,13 @@ def yahoo_search(query):
         exchange = quote.get("exchDisp") or quote.get("exchange") or ""
         first_trade_ms = quote.get("firstTradeDateMilliseconds")
         hint_start = ""
+        hint_start_source = ""
         if first_trade_ms:
             hint_start = datetime.fromtimestamp(first_trade_ms / 1000, timezone.utc).date().isoformat()
+            hint_start_source = "yahoo_search"
+        if not hint_start:
+            hint_start = lookup_catalog_hint_start(symbol)
+            hint_start_source = "catalog" if hint_start else ""
         dynamic_id = f"Y:{symbol.upper()}"
         items.append(
             {
@@ -288,6 +321,8 @@ def yahoo_search(query):
                 "source": "yahoo",
                 "currency": quote.get("currency") or "",
                 "hintStart": hint_start,
+                "hintStartSource": hint_start_source,
+                "dataQuality": "metadata" if hint_start else "unverified",
                 "keywords": f"{symbol} {name} {exchange}",
                 "exchange": exchange,
                 "dynamic": True,
@@ -353,8 +388,10 @@ def yahoo_symbol_fallback_search(query):
                 "source": "yahoo",
                 "currency": candidate.get("currency") or hint.get("currency") or "",
                 "hintStart": hint.get("hintStart") or "",
+                "hintStartSource": hint.get("hintStartSource") or "market_probe",
                 "lastDate": hint.get("lastDate") or "",
                 "dataCount": int(hint.get("dataCount") or 0),
+                "dataQuality": hint.get("dataQuality") or "verified",
                 "disabledReason": hint.get("disabledReason") or "",
                 "keywords": f"{symbol} {candidate.get('name') or ''}",
                 "dynamic": True,
@@ -642,21 +679,28 @@ def data_availability_reason(meta):
 def enrich_asset_market_profile(meta, force=False):
     meta = dict(meta)
     if not force and meta.get("hintStart") and (not meta.get("dynamic") or "dataCount" in meta):
+        meta.setdefault("hintStartSource", "catalog" if not meta.get("dynamic") else "market_probe")
+        meta.setdefault("dataQuality", "known" if not meta.get("dynamic") else "verified")
         meta["disabledReason"] = data_availability_reason(meta)
         return meta
     try:
         if meta.get("source") == "fund_nav_accum":
             profile = fetch_fund_profile(meta["symbol"])
             meta.update(profile)
+            meta.setdefault("hintStartSource", "fund_profile")
         else:
             rows = get_series(meta["id"])
             meta["hintStart"] = rows[0]["date"] if rows else DATA_UNAVAILABLE_HINT
+            meta["hintStartSource"] = "market_series"
             meta["lastDate"] = rows[-1]["date"] if rows else ""
             meta["dataCount"] = len(rows)
+        meta["dataQuality"] = "verified"
     except Exception:
         meta["hintStart"] = DATA_UNAVAILABLE_HINT
+        meta["hintStartSource"] = ""
         meta["lastDate"] = ""
         meta["dataCount"] = 0
+        meta["dataQuality"] = "unavailable"
         meta["dataUnavailable"] = True
     meta["disabledReason"] = data_availability_reason(meta)
     return meta
@@ -691,7 +735,13 @@ def complete_search_items(items):
     completed = [None] * len(items)
     pending = []
     for index, item in enumerate(items):
-        if item.get("dynamic"):
+        if item.get("dynamic") and item.get("hintStart") and "dataCount" not in item:
+            quick = dict(item)
+            quick.setdefault("hintStartSource", "metadata")
+            quick.setdefault("dataQuality", "metadata")
+            quick["disabledReason"] = data_availability_reason(quick)
+            completed[index] = quick
+        elif item.get("dynamic"):
             pending.append((index, item))
         else:
             completed[index] = enrich_asset_market_profile(item)
@@ -860,32 +910,59 @@ def _series_starts_too_late(asset_id, rows, hint_start=""):
         return False
 
 
+def _fallback_rows_acceptable(rows, hint_start=""):
+    warnings = series_quality_warnings(rows, hint_start)
+    return bool(rows) and "large_gap" not in warnings and "start_late" not in warnings, warnings
+
+
 def _yahoo_series_with_backfill(meta, symbol):
-    rows = fetch_yahoo(meta["symbol"])
     hint_start = meta.get("hintStart", "")
-    if not hint_start or _series_starts_too_late(meta["id"], rows, hint_start):
-        if not hint_start:
+    try:
+        rows = fetch_yahoo_chart(meta["symbol"])
+    except Exception as yahoo_exc:
+        log_event("market.yahoo.error", symbol=meta["id"], error=type(yahoo_exc).__name__)
+        try:
+            fallback_rows = fetch_sina_us_daily(symbol)
+        except Exception as sina_exc:
             log_event(
-                "market.series.start_fallback",
+                "market.yahoo_fallback.sina_us_error",
                 symbol=meta["id"],
-                reason="missing_hint",
+                yahoo_error=type(yahoo_exc).__name__,
+                sina_error=type(sina_exc).__name__,
             )
-        else:
+            raise yahoo_exc
+        acceptable, warnings = _fallback_rows_acceptable(fallback_rows, hint_start)
+        if not acceptable:
             log_event(
-                "market.series.start_fallback",
+                "market.yahoo_fallback.sina_us_rejected",
                 symbol=meta["id"],
-                reason="drift",
-                start=rows[0]["date"],
-                expected_hint=hint_start,
-                count=len(rows),
+                count=len(fallback_rows),
+                start=fallback_rows[0]["date"] if fallback_rows else "",
+                warnings=",".join(warnings),
             )
+            raise yahoo_exc
+        log_event("market.yahoo_fallback.sina_us", symbol=meta["id"], count=len(fallback_rows))
+        return fallback_rows
+
+    if not hint_start:
+        return rows
+
+    if _series_starts_too_late(meta["id"], rows, hint_start):
+        log_event(
+            "market.series.start_fallback",
+            symbol=meta["id"],
+            reason="drift",
+            start=rows[0]["date"] if rows else "",
+            expected_hint=hint_start,
+            count=len(rows),
+        )
     else:
         return rows
 
     log_event(
         "market.series.start_gap",
         symbol=meta["id"],
-        start=rows[0]["date"],
+        start=rows[0]["date"] if rows else "",
         expected_hint=meta.get("hintStart") or "",
         count=len(rows),
         source="yahoo",
@@ -893,6 +970,17 @@ def _yahoo_series_with_backfill(meta, symbol):
     try:
         fallback_rows = fetch_sina_us_daily(symbol)
     except Exception:
+        return rows
+
+    acceptable, warnings = _fallback_rows_acceptable(fallback_rows, hint_start)
+    if not acceptable:
+        log_event(
+            "market.yahoo_fallback.sina_us_rejected",
+            symbol=meta["id"],
+            count=len(fallback_rows),
+            start=fallback_rows[0]["date"] if fallback_rows else "",
+            warnings=",".join(warnings),
+        )
         return rows
 
     if not rows:
