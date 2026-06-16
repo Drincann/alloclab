@@ -363,9 +363,11 @@ def fund_catalog():
 
 def start_fund_catalog_load():
     global FUND_LIST_LOADING
-    if FUND_LIST_LOADING or ak is None:
+    if FUND_LIST_LOADING:
         return
     load_fund_catalog_seed()
+    if ak is None:
+        return
     FUND_LIST_LOADING = True
 
     def load():
@@ -403,6 +405,15 @@ def fund_catalog_if_ready():
         return seed_rows
     start_fund_catalog_load()
     return None
+
+
+def fund_catalog_status():
+    return {
+        "ready": FUND_LIST_CACHE is not None,
+        "loading": FUND_LIST_LOADING,
+        "count": len(FUND_LIST_CACHE or []),
+        "error": FUND_LIST_ERROR,
+    }
 
 
 def fetch_fund_start_date(code):
@@ -1156,10 +1167,19 @@ class AppHandler(SimpleHTTPRequestHandler):
                         if len(items) >= 24:
                             break
                 log_event("search.done", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
-                json_response(self, {"items": [{k: v for k, v in item.items() if k != "keywords"} for item in items]})
+                json_response(
+                    self,
+                    {
+                        "items": [{k: v for k, v in item.items() if k != "keywords"} for item in items],
+                        "fundCatalog": fund_catalog_status(),
+                    },
+                )
                 return
             if parsed.path == "/api/catalog":
                 json_response(self, {"items": [{k: v for k, v in item.items() if k != "keywords"} for item in CATALOG]})
+                return
+            if parsed.path == "/api/fund-catalog-status":
+                json_response(self, fund_catalog_status())
                 return
             super().do_GET()
         except Exception as exc:

@@ -68,6 +68,7 @@ let searchDebounceTimer = null;
 let searchRequestSeq = 0;
 let searchAbortController = null;
 let fundStartHintRequestSeq = 0;
+let fundCatalogRefreshSeq = 0;
 const FUND_START_LOADING_HINT = "查询中";
 const FUND_START_UNAVAILABLE_HINT = "不可用";
 
@@ -772,6 +773,25 @@ async function refreshSearchFundStartHints(items, requestSeq) {
   }
 }
 
+async function refreshSearchWhenFundCatalogReady(query, requestSeq) {
+  const catalogRefreshSeq = ++fundCatalogRefreshSeq;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (requestSeq !== searchRequestSeq || catalogRefreshSeq !== fundCatalogRefreshSeq) return;
+    let status;
+    try {
+      status = await api("/api/fund-catalog-status");
+    } catch {
+      return;
+    }
+    if (status.loading) continue;
+    if (!status.ready) return;
+    if (requestSeq !== searchRequestSeq || catalogRefreshSeq !== fundCatalogRefreshSeq) return;
+    await renderSearch(query, { preserveScroll: true });
+    return;
+  }
+}
+
 async function loadCatalog() {
   const data = await api("/api/catalog");
   state.catalog = data.items;
@@ -802,6 +822,9 @@ async function renderSearch(query, options = {}) {
       if (requestSeq !== searchRequestSeq) return;
       items = data.items;
       mergeCatalogItems(items);
+      if (data.fundCatalog?.loading) {
+        refreshSearchWhenFundCatalogReady(query, requestSeq);
+      }
     } catch (error) {
       if (error.name === "AbortError" || requestSeq !== searchRequestSeq) return;
       els.searchResults.innerHTML = `<div class="status error">${error.message}</div>`;
