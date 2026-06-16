@@ -1336,8 +1336,9 @@ function applyFavorite(id) {
   applyPortfolioSnapshot(favorite);
 }
 
-function applyPortfolioSnapshot(portfolio) {
+function applyPortfolioSnapshot(portfolio, options = {}) {
   if (state.loading || !portfolio) return;
+  const shouldRun = options.autoRun !== false;
   mergeCatalogItems(portfolio.catalog || []);
   state.assets = (portfolio.assets || []).map((asset) => ({
     id: asset.id,
@@ -1358,6 +1359,10 @@ function applyPortfolioSnapshot(portfolio) {
   });
   closeShareDialog();
   saveState();
+  if (shouldRun) {
+    runBacktest(true);
+    return;
+  }
   markBacktestDirty();
 }
 
@@ -2137,16 +2142,11 @@ function bindEvents() {
   els.optimizeBtn.addEventListener("click", optimize);
   els.resetZoomBtn.addEventListener("click", () => {
     if (!state.result || state.loading) return;
-    const hasDateRange = Boolean(els.startInput.value || els.endInput.value);
     els.startInput.value = "";
     els.endInput.value = "";
     state.view = { start: 0, end: state.result.dates.length - 1 };
     saveState();
-    if (hasDateRange) {
-      markBacktestDirty();
-    } else {
-      renderChart();
-    }
+    runBacktest(true);
   });
   window.addEventListener("resize", renderChart);
   watchSystemTheme();
