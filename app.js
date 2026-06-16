@@ -852,7 +852,8 @@ function renderShareDialog() {
   const portfolio = dialog.portfolio;
   const metrics = portfolio.metrics || {};
   els.shareOverlay.dataset.mode = dialog.mode;
-  document.getElementById("shareTitle").textContent = shareTitleForMode(dialog.mode);
+  document.getElementById("shareTitle").textContent =
+    dialog.mode === "received" ? portfolio.name || t("sharedPortfolio") : shareTitleForMode(dialog.mode);
   els.shareSubtitle.textContent = shareSubtitleForMode(dialog.mode);
   els.shareNameRow.style.display = dialog.mode === "draft" ? "grid" : "none";
   if (dialog.mode === "draft" && els.shareNameInput.value !== portfolio.name) {
