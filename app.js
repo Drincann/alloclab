@@ -119,7 +119,6 @@ const I18N = {
     portfolioWeights: "组合比例",
     shareDraftHint: "确认展示效果后生成链接",
     shareCreatedHint: "复制链接后发给别人",
-    shareReceivedHint: "这是一个分享给你的组合，应用前不会覆盖当前视图",
     createShareFailed: "生成分享链接失败",
     loadShareFailed: "分享链接读取失败",
     noShareMetrics: "暂无回测指标",
@@ -246,7 +245,6 @@ const I18N = {
     portfolioWeights: "Weights",
     shareDraftHint: "Review the presentation, then create a link",
     shareCreatedHint: "Copy the link and send it",
-    shareReceivedHint: "This shared portfolio will not change your current view until you apply it",
     createShareFailed: "Failed to create share link",
     loadShareFailed: "Failed to load share link",
     noShareMetrics: "No backtest metrics yet",
@@ -810,7 +808,6 @@ function shareTitleForMode(mode) {
 }
 
 function shareSubtitleForMode(mode) {
-  if (mode === "received") return t("shareReceivedHint");
   if (mode === "created") return t("shareCreatedHint");
   return t("shareDraftHint");
 }
@@ -886,6 +883,7 @@ function renderShareDialog() {
   document.getElementById("shareTitle").textContent =
     dialog.mode === "received" ? portfolio.name || t("sharedPortfolio") : shareTitleForMode(dialog.mode);
   els.shareSubtitle.textContent = shareSubtitleForMode(dialog.mode);
+  els.shareSubtitle.style.display = dialog.mode === "received" ? "none" : "";
   els.shareNameRow.style.display = dialog.mode === "draft" ? "grid" : "none";
   if (dialog.mode === "draft" && els.shareNameInput.value !== portfolio.name) {
     els.shareNameInput.value = portfolio.name || "";
