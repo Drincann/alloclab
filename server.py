@@ -386,20 +386,41 @@ def fetch_fund_start_date(code):
     return FUND_START_CACHE[code]
 
 
-def enrich_fund_start_dates(items):
-    dynamic_items = [
-        item for item in items if item.get("id", "").startswith("F:") and item.get("hintStart") == "查询中"
-    ]
-    if not dynamic_items:
-        return items
-    with ThreadPoolExecutor(max_workers=min(6, len(dynamic_items))) as executor:
-        futures = {
-            executor.submit(fetch_fund_start_date, item["symbol"]): item
-            for item in dynamic_items
-        }
+def dynamic_fund_hint_start(code):
+    return CATALOG_BY_ID.get(code, {}).get("hintStart") or "查询中"
+
+
+def fund_start_hint(asset_id):
+    if asset_id in CATALOG_BY_ID:
+        return CATALOG_BY_ID[asset_id].get("hintStart", "") or "不可用"
+    if asset_id.startswith("F:"):
+        return fetch_fund_start_date(asset_id[2:])
+    return ""
+
+
+def fund_start_hints(asset_ids):
+    hints = []
+    normalized_ids = []
+    seen = set()
+    for asset_id in asset_ids:
+        asset_id = str(asset_id or "").strip()
+        if not asset_id or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        if asset_id in CATALOG_BY_ID or asset_id.startswith("F:"):
+            normalized_ids.append(asset_id)
+    if not normalized_ids:
+        return hints
+    with ThreadPoolExecutor(max_workers=min(6, len(normalized_ids))) as executor:
+        futures = {executor.submit(fund_start_hint, asset_id): asset_id for asset_id in normalized_ids}
         for future in as_completed(futures):
-            futures[future]["hintStart"] = future.result()
-    return items
+            asset_id = futures[future]
+            try:
+                hint_start = future.result()
+            except Exception:
+                hint_start = "不可用"
+            hints.append({"id": asset_id, "hintStart": hint_start or "不可用"})
+    return hints
 
 
 def fund_search(query, limit=12):
@@ -417,7 +438,7 @@ def fund_search(query, limit=12):
                     "assetClass": "China Fund",
                     "source": "fund_nav_accum",
                     "currency": "CNY",
-                    "hintStart": CATALOG_BY_ID.get(key, {}).get("hintStart", ""),
+                    "hintStart": dynamic_fund_hint_start(key),
                     "keywords": key,
                     "dynamic": key not in CATALOG_BY_ID,
                 }
@@ -437,7 +458,7 @@ def fund_search(query, limit=12):
                 "assetClass": row["type"] or "China Fund",
                 "source": "fund_nav_accum",
                 "currency": "CNY",
-                "hintStart": CATALOG_BY_ID.get(row["code"], {}).get("hintStart", ""),
+                "hintStart": dynamic_fund_hint_start(row["code"]),
                 "keywords": f"{row['code']} {row['name']} {row['abbr']} {row['pinyin']}",
                 "dynamic": item_id.startswith("F:"),
             }
@@ -922,6 +943,10 @@ def access_key():
     return os.environ.get(ACCESS_KEY_ENV) or os.environ.get(LEGACY_ACCESS_KEY_ENV, "")
 
 
+def auth_enabled():
+    return bool(access_key())
+
+
 def key_help_url():
     return os.environ.get(KEY_HELP_URL_ENV) or os.environ.get(LEGACY_KEY_HELP_URL_ENV, "")
 
@@ -971,6 +996,8 @@ def valid_access_key(candidate):
 
 
 def require_api_key(handler):
+    if not auth_enabled():
+        return True
     ip = client_ip(handler)
     if auth_locked(ip):
         json_response(handler, AUTH_ERROR, 401)
@@ -985,6 +1012,7 @@ def require_api_key(handler):
 def serve_index(handler):
     html = (APP_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace("__PORTFOLIO_KEY_HELP_URL__", json.dumps(key_help_url(), ensure_ascii=False))
+    html = html.replace("__ALLOCLAB_AUTH_REQUIRED__", json.dumps(auth_enabled()))
     data = html.encode("utf-8")
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1094,6 +1122,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             if self.path == "/api/verify-key":
+                if not auth_enabled():
+                    json_response(self, {"ok": True, "keyHelpUrl": key_help_url(), "authRequired": False})
+                    return
                 ip = client_ip(self)
                 if auth_locked(ip):
                     json_response(self, AUTH_ERROR, 401)
@@ -1119,6 +1150,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                     payload.get("end") or None,
                 )
                 json_response(self, result)
+                return
+            if self.path == "/api/fund-start-hints":
+                asset_ids = payload.get("assetIds", [])
+                if not isinstance(asset_ids, list):
+                    json_response(self, {"error": "assetIds 必须是数组"}, 400)
+                    return
+                json_response(self, {"items": fund_start_hints(asset_ids)})
                 return
             if self.path == "/api/optimize":
                 assets = payload.get("assets", [])

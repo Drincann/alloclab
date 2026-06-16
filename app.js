@@ -67,6 +67,9 @@ let debounceTimer = null;
 let searchDebounceTimer = null;
 let searchRequestSeq = 0;
 let searchAbortController = null;
+let fundStartHintRequestSeq = 0;
+const FUND_START_LOADING_HINT = "查询中";
+const FUND_START_UNAVAILABLE_HINT = "不可用";
 
 const I18N = {
   zh: {
@@ -119,6 +122,7 @@ const I18N = {
     unknown: "未知",
     searching: "搜索中",
     startSince: "起始",
+    startLoading: "加载中",
     added: "已添加",
     add: "添加",
     remove: "移除",
@@ -225,6 +229,7 @@ const I18N = {
     unknown: "Unknown",
     searching: "Searching",
     startSince: "Start",
+    startLoading: "Loading",
     added: "Added",
     add: "Add",
     remove: "Remove",
@@ -419,6 +424,10 @@ function clearStoredAccessKey() {
   localStorage.removeItem(ACCESS_KEY_STORAGE_KEY);
 }
 
+function authRequired() {
+  return window.ALLOCLAB_AUTH_REQUIRED !== false;
+}
+
 function configureAuthHelpLink() {
   const url = window.PORTFOLIO_KEY_HELP_URL;
   if (typeof url === "string" && url && !url.includes("__PORTFOLIO_KEY_HELP_URL__")) {
@@ -535,8 +544,13 @@ function mergeCatalogItems(items) {
     } else {
       state.catalog.push(item);
     }
-    if (item.dynamic && !state.extraCatalog.some((known) => known.id === item.id)) {
-      state.extraCatalog.push(item);
+    if (item.dynamic) {
+      const extraIndex = state.extraCatalog.findIndex((known) => known.id === item.id);
+      if (extraIndex >= 0) {
+        state.extraCatalog[extraIndex] = { ...state.extraCatalog[extraIndex], ...item };
+      } else {
+        state.extraCatalog.push(item);
+      }
     }
   }
 }
@@ -679,6 +693,85 @@ function scheduleSearch(query) {
   searchDebounceTimer = setTimeout(() => renderSearch(query), 450);
 }
 
+function isFundStartHintLoading(item) {
+  return item?.hintStart === FUND_START_LOADING_HINT;
+}
+
+function fundStartHintMarkup(item) {
+  if (isFundStartHintLoading(item)) {
+    return `<span class="inline-loading"><span class="inline-spinner" aria-hidden="true"></span>${escapeHtml(t("startLoading"))}</span>`;
+  }
+  return escapeHtml(item.hintStart || t("unknown"));
+}
+
+function renderSearchItems(items, options = {}) {
+  const selected = new Set(state.assets.map((asset) => asset.id));
+  const previousScrollTop = options.previousScrollTop || 0;
+  els.searchResults.innerHTML = "";
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "search-result";
+    button.dataset.assetId = item.id;
+    button.disabled = state.loading || selected.has(item.id);
+    button.innerHTML = `
+      <div>
+        <strong>${escapeHtml(item.id)} · ${escapeHtml(item.name)}</strong>
+        <div class="meta">${escapeHtml(assetClassLabel(item.assetClass))} · ${escapeHtml(item.currency || "")} · ${t("startSince")} ${fundStartHintMarkup(item)}</div>
+      </div>
+      <span>${selected.has(item.id) ? t("added") : t("add")}</span>
+    `;
+    button.addEventListener("click", () => addAsset(item.id));
+    els.searchResults.appendChild(button);
+  }
+  if (options.preserveScroll) {
+    els.searchResults.scrollTop = previousScrollTop;
+  }
+}
+
+async function refreshSearchFundStartHints(items, requestSeq) {
+  const assetIds = items
+    .filter((item) => item.id && isFundStartHintLoading(item))
+    .map((item) => item.id);
+  if (!assetIds.length) return;
+  const hintRequestSeq = ++fundStartHintRequestSeq;
+  try {
+    const data = await api("/api/fund-start-hints", {
+      method: "POST",
+      body: JSON.stringify({ assetIds }),
+    });
+    if (requestSeq !== searchRequestSeq || hintRequestSeq !== fundStartHintRequestSeq) return;
+    const hints = new Map((data.items || []).map((item) => [item.id, item.hintStart || FUND_START_UNAVAILABLE_HINT]));
+    const updatedItems = [];
+    for (const item of items) {
+      if (!hints.has(item.id)) continue;
+      item.hintStart = hints.get(item.id);
+      updatedItems.push(item);
+    }
+    if (!updatedItems.length) return;
+    mergeCatalogItems(updatedItems);
+    renderSearchItems(items, {
+      preserveScroll: true,
+      previousScrollTop: els.searchResults.scrollTop,
+    });
+    renderAssets();
+    saveState();
+  } catch (error) {
+    if (requestSeq !== searchRequestSeq || hintRequestSeq !== fundStartHintRequestSeq) return;
+    const failedIds = new Set(assetIds);
+    for (const item of items) {
+      if (failedIds.has(item.id)) {
+        item.hintStart = FUND_START_UNAVAILABLE_HINT;
+      }
+    }
+    mergeCatalogItems(items.filter((item) => failedIds.has(item.id)));
+    renderSearchItems(items, {
+      preserveScroll: true,
+      previousScrollTop: els.searchResults.scrollTop,
+    });
+  }
+}
+
 async function loadCatalog() {
   const data = await api("/api/catalog");
   state.catalog = data.items;
@@ -697,7 +790,6 @@ async function renderSearch(query, options = {}) {
   }
   const previousScrollTop = options.preserveScroll ? els.searchResults.scrollTop : 0;
   const q = query.trim().toLowerCase();
-  const selected = new Set(state.assets.map((asset) => asset.id));
   let items = [];
   const controller = q ? new AbortController() : null;
   if (controller) {
@@ -723,26 +815,8 @@ async function renderSearch(query, options = {}) {
     items = state.catalog.slice(0, 12);
   }
   if (requestSeq !== searchRequestSeq) return;
-  els.searchResults.innerHTML = "";
-  for (const item of items) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "search-result";
-    button.dataset.assetId = item.id;
-    button.disabled = state.loading || selected.has(item.id);
-    button.innerHTML = `
-      <div>
-        <strong>${escapeHtml(item.id)} · ${escapeHtml(item.name)}</strong>
-        <div class="meta">${escapeHtml(assetClassLabel(item.assetClass))} · ${escapeHtml(item.currency || "")} · ${t("startSince")} ${escapeHtml(item.hintStart || t("unknown"))}</div>
-      </div>
-      <span>${selected.has(item.id) ? t("added") : t("add")}</span>
-    `;
-    button.addEventListener("click", () => addAsset(item.id));
-    els.searchResults.appendChild(button);
-  }
-  if (options.preserveScroll) {
-    els.searchResults.scrollTop = previousScrollTop;
-  }
+  renderSearchItems(items, { preserveScroll: options.preserveScroll, previousScrollTop });
+  refreshSearchFundStartHints(items, requestSeq);
 }
 
 function refreshSearchSelectionState() {
@@ -1714,9 +1788,12 @@ async function init() {
   loadSavedState();
   applyI18n();
   bindEvents();
-  if (!storedAccessKey()) {
+  if (authRequired() && !storedAccessKey()) {
     showAuthOverlay();
     return;
+  }
+  if (!authRequired()) {
+    clearStoredAccessKey();
   }
   await bootstrapApp();
 }
