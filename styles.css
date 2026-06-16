@@ -162,7 +162,7 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .share-head .icon-btn {
@@ -347,7 +347,7 @@ body {
 .share-actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: 6px;
+  margin-top: 2px;
 }
 
 .auth-panel h2 {
