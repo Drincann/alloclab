@@ -2,6 +2,7 @@ import json
 import hmac
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -167,7 +168,7 @@ def http_get_json(url, headers=None, timeout=30):
         return json.load(resp)
 
 
-def fetch_yahoo(symbol):
+def fetch_yahoo_chart(symbol):
     end = int(time.time()) + 7 * 24 * 3600
     url = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -186,6 +187,53 @@ def fetch_yahoo(symbol):
         date = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
         rows.append({"date": date, "close": float(close)})
     return rows
+
+
+def fetch_sina_us_daily(symbol):
+    sina_symbol = symbol.upper().split(".")[0]
+    callback_name = re.sub(r"[^a-z0-9_]", "_", sina_symbol.lower())
+    url = (
+        "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/"
+        + urllib.parse.quote(f"var {callback_name}=")
+        + "/US_MinKService.getDailyK?"
+        + urllib.parse.urlencode({"symbol": sina_symbol})
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    match = re.search(r"=\((.*)\);?\s*$", text, re.S)
+    if not match:
+        raise RuntimeError(f"Sina US daily data format changed: {sina_symbol}")
+    data = json.loads(match.group(1))
+    rows = []
+    for row in data:
+        date = row.get("d")
+        close = row.get("c")
+        if not date or close in (None, ""):
+            continue
+        close_value = float(close)
+        if close_value > 0:
+            rows.append({"date": date, "close": close_value})
+    return sorted(rows, key=lambda item: item["date"])
+
+
+def fetch_yahoo(symbol):
+    try:
+        return fetch_yahoo_chart(symbol)
+    except Exception as yahoo_exc:
+        try:
+            rows = fetch_sina_us_daily(symbol)
+            if rows:
+                log_event("market.yahoo_fallback.sina_us", symbol=symbol, count=len(rows))
+                return rows
+        except Exception as sina_exc:
+            log_event(
+                "market.yahoo_fallback.sina_us_error",
+                symbol=symbol,
+                yahoo_error=type(yahoo_exc).__name__,
+                sina_error=type(sina_exc).__name__,
+            )
+        raise yahoo_exc
 
 
 def yahoo_search(query):
