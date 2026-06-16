@@ -20,6 +20,7 @@ const state = {
   bootstrapped: false,
   language: "zh",
   theme: "light",
+  themePreference: "system",
   shareDialog: null,
 };
 
@@ -393,9 +394,8 @@ function loadLanguage() {
 
 function loadTheme() {
   const stored = localStorage.getItem(THEME_KEY);
-  if (stored === "dark" || stored === "light") {
-    state.theme = stored;
-  }
+  state.themePreference = stored === "dark" || stored === "light" ? stored : "system";
+  state.theme = effectiveTheme();
 }
 
 function saveLanguage() {
@@ -403,7 +403,37 @@ function saveLanguage() {
 }
 
 function saveTheme() {
-  localStorage.setItem(THEME_KEY, state.theme);
+  localStorage.setItem(THEME_KEY, state.themePreference);
+}
+
+function systemTheme() {
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function effectiveTheme() {
+  return state.themePreference === "system" ? systemTheme() : state.themePreference;
+}
+
+function refreshSystemTheme() {
+  if (state.themePreference !== "system") return;
+  const nextTheme = effectiveTheme();
+  if (nextTheme === state.theme) return;
+  state.theme = nextTheme;
+  applyTheme();
+  if (state.result) {
+    renderChart();
+    renderLegend();
+  }
+}
+
+function watchSystemTheme() {
+  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+  if (!media) return;
+  if (typeof media.addEventListener === "function") {
+    media.addEventListener("change", refreshSystemTheme);
+  } else if (typeof media.addListener === "function") {
+    media.addListener(refreshSystemTheme);
+  }
 }
 
 function renderLanguageMode() {
@@ -422,6 +452,7 @@ function renderThemeMode() {
 }
 
 function applyTheme() {
+  state.theme = effectiveTheme();
   document.documentElement.dataset.theme = state.theme;
   renderThemeMode();
 }
@@ -2076,7 +2107,8 @@ function bindEvents() {
     preserveScroll(rerenderLocalizedContent);
   });
   els.themeToggleBtn.addEventListener("click", () => {
-    state.theme = state.theme === "dark" ? "light" : "dark";
+    state.themePreference = state.theme === "dark" ? "light" : "dark";
+    state.theme = effectiveTheme();
     saveTheme();
     applyTheme();
     if (state.result) {
@@ -2099,6 +2131,7 @@ function bindEvents() {
     }
   });
   window.addEventListener("resize", renderChart);
+  watchSystemTheme();
 
   els.canvas.addEventListener("mousedown", (event) => {
     if (state.loading) return;
