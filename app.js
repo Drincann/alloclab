@@ -920,6 +920,7 @@ function renderShareDialog() {
   els.shareLinkInput.parentElement.style.display = dialog.mode === "created" ? "grid" : "none";
   els.shareCopyBtn.style.display = dialog.mode === "created" ? "" : "none";
   els.shareStatus.textContent = dialog.status || "";
+  els.shareStatus.style.display = dialog.status ? "" : "none";
   els.shareCreateBtn.style.display = dialog.mode === "draft" ? "" : "none";
   els.shareCreateBtn.disabled = state.loading || dialog.generating;
   els.shareCreateBtn.textContent = dialog.generating ? t("creatingShareLink") : t("createShareLink");
