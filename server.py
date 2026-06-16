@@ -138,6 +138,8 @@ FUND_LIST_CACHE = None
 FUND_LIST_LOADING = False
 FUND_LIST_ERROR = None
 FUND_START_CACHE = {}
+YAHOO_SEARCH_DISABLED_UNTIL = 0
+YAHOO_SEARCH_COOLDOWN_SECONDS = 5 * 60
 ACCESS_KEY_ENV = "ALLOCLAB_ACCESS_KEY"
 KEY_HELP_URL_ENV = "ALLOCLAB_KEY_HELP_URL"
 LEGACY_ACCESS_KEY_ENV = "PORTFOLIO_APP_ACCESS_KEY"
@@ -276,6 +278,15 @@ def yahoo_search(query):
         )
     SEARCH_CACHE[key] = items
     return items
+
+
+def yahoo_search_available():
+    return time.time() >= YAHOO_SEARCH_DISABLED_UNTIL
+
+
+def record_yahoo_search_failure():
+    global YAHOO_SEARCH_DISABLED_UNTIL
+    YAHOO_SEARCH_DISABLED_UNTIL = time.time() + YAHOO_SEARCH_COOLDOWN_SECONDS
 
 
 def load_fund_catalog_seed():
@@ -1116,28 +1127,39 @@ class AppHandler(SimpleHTTPRequestHandler):
                 if query and should_search_yahoo(query):
                     existing = {item["id"] for item in items}
                     yahoo_started = time.time()
-                    try:
-                        yahoo_items = yahoo_search(query)
+                    if not yahoo_search_available():
                         log_event(
-                            "search.yahoo.done",
+                            "search.yahoo.skipped",
                             query=query,
-                            count=len(yahoo_items),
-                            elapsed_ms=int((time.time() - yahoo_started) * 1000),
-                        )
-                    except Exception as exc:
-                        log_event(
-                            "search.yahoo.error",
-                            query=query,
-                            error=type(exc).__name__,
-                            elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                            reason="cooldown",
+                            remaining_seconds=int(max(0, YAHOO_SEARCH_DISABLED_UNTIL - time.time())),
                         )
                         yahoo_items = []
-                    for item in yahoo_items:
-                        if item["id"] not in existing:
-                            items.append(item)
-                            existing.add(item["id"])
-                        if len(items) >= 18:
-                            break
+                    else:
+                        try:
+                            yahoo_items = yahoo_search(query)
+                            log_event(
+                                "search.yahoo.done",
+                                query=query,
+                                count=len(yahoo_items),
+                                elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                            )
+                        except Exception as exc:
+                            record_yahoo_search_failure()
+                            log_event(
+                                "search.yahoo.error",
+                                query=query,
+                                error=type(exc).__name__,
+                                cooldown_seconds=YAHOO_SEARCH_COOLDOWN_SECONDS,
+                                elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                            )
+                            yahoo_items = []
+                        for item in yahoo_items:
+                            if item["id"] not in existing:
+                                items.append(item)
+                                existing.add(item["id"])
+                            if len(items) >= 18:
+                                break
                 if query and should_search_funds(query):
                     existing = {item["id"] for item in items}
                     fund_started = time.time()

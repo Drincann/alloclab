@@ -69,6 +69,8 @@ let searchRequestSeq = 0;
 let searchAbortController = null;
 let fundStartHintRequestSeq = 0;
 let fundCatalogRefreshSeq = 0;
+let searchCatalogNotice = "";
+let searchCatalogNoticeTimer = null;
 const FUND_START_LOADING_HINT = "查询中";
 const FUND_START_UNAVAILABLE_HINT = "不可用";
 
@@ -124,6 +126,8 @@ const I18N = {
     searching: "搜索中",
     startSince: "起始",
     startLoading: "加载中",
+    fundCatalogUpdating: "基金目录更新中",
+    fundCatalogUpdated: "基金目录已更新",
     added: "已添加",
     add: "添加",
     remove: "移除",
@@ -231,6 +235,8 @@ const I18N = {
     searching: "Searching",
     startSince: "Start",
     startLoading: "Loading",
+    fundCatalogUpdating: "Updating fund catalog",
+    fundCatalogUpdated: "Fund catalog updated",
     added: "Added",
     add: "Add",
     remove: "Remove",
@@ -705,6 +711,28 @@ function fundStartHintMarkup(item) {
   return escapeHtml(item.hintStart || t("unknown"));
 }
 
+function renderSearchCatalogNotice() {
+  const existing = els.searchResults.querySelector(".search-catalog-status");
+  if (existing) existing.remove();
+  if (!searchCatalogNotice) return;
+  const status = document.createElement("div");
+  status.className = "status search-catalog-status";
+  status.textContent = searchCatalogNotice;
+  els.searchResults.appendChild(status);
+}
+
+function setSearchCatalogNotice(message, autoClearMs = 0) {
+  clearTimeout(searchCatalogNoticeTimer);
+  searchCatalogNotice = message || "";
+  renderSearchCatalogNotice();
+  if (autoClearMs > 0) {
+    searchCatalogNoticeTimer = setTimeout(() => {
+      searchCatalogNotice = "";
+      renderSearchCatalogNotice();
+    }, autoClearMs);
+  }
+}
+
 function renderSearchItems(items, options = {}) {
   const selected = new Set(state.assets.map((asset) => asset.id));
   const previousScrollTop = options.previousScrollTop || 0;
@@ -728,6 +756,7 @@ function renderSearchItems(items, options = {}) {
   if (options.preserveScroll) {
     els.searchResults.scrollTop = previousScrollTop;
   }
+  renderSearchCatalogNotice();
 }
 
 async function refreshSearchFundStartHints(items, requestSeq) {
@@ -775,6 +804,7 @@ async function refreshSearchFundStartHints(items, requestSeq) {
 
 async function refreshSearchWhenFundCatalogReady(query, requestSeq) {
   const catalogRefreshSeq = ++fundCatalogRefreshSeq;
+  setSearchCatalogNotice(t("fundCatalogUpdating"));
   for (let attempt = 0; attempt < 15; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (requestSeq !== searchRequestSeq || catalogRefreshSeq !== fundCatalogRefreshSeq) return;
@@ -788,8 +818,10 @@ async function refreshSearchWhenFundCatalogReady(query, requestSeq) {
     if (!status.ready) return;
     if (requestSeq !== searchRequestSeq || catalogRefreshSeq !== fundCatalogRefreshSeq) return;
     await renderSearch(query, { preserveScroll: true });
+    setSearchCatalogNotice(t("fundCatalogUpdated"), 1800);
     return;
   }
+  setSearchCatalogNotice("");
 }
 
 async function loadCatalog() {
@@ -804,6 +836,8 @@ async function loadCatalog() {
 
 async function renderSearch(query, options = {}) {
   const requestSeq = ++searchRequestSeq;
+  fundCatalogRefreshSeq += 1;
+  setSearchCatalogNotice("");
   if (searchAbortController) {
     searchAbortController.abort();
     searchAbortController = null;
