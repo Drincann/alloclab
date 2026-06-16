@@ -147,7 +147,6 @@ DATA_UNAVAILABLE_HINT = "不可用"
 DATA_UNAVAILABLE_REASON = "行情不可用"
 INSUFFICIENT_DATA_REASON = "数据不足"
 MAX_MARKET_START_DRIFT_DAYS = 365 * 2
-MAX_SERIES_GAP_DAYS = 365
 BITCOIN_YAHOO_FALLBACKS = [
     {"symbol": "BTC-USD", "name": "Bitcoin USD", "assetClass": "CRYPTOCURRENCY", "currency": "USD"},
     {"symbol": "BTC=F", "name": "Bitcoin Futures", "assetClass": "FUTURE", "currency": "USD"},
@@ -861,37 +860,6 @@ def _series_starts_too_late(asset_id, rows, hint_start=""):
         return False
 
 
-def _trim_backfill_prefix(primary_rows, fallback_rows, max_gap_days=MAX_SERIES_GAP_DAYS):
-    if not primary_rows or not fallback_rows:
-        return primary_rows
-
-    anchor = primary_rows[0]["date"]
-    anchor_date = datetime.strptime(anchor, "%Y-%m-%d")
-    anchor_index = None
-    for idx in range(len(fallback_rows) - 1, -1, -1):
-        if fallback_rows[idx]["date"] < anchor:
-            anchor_index = idx
-            break
-    if anchor_index is None:
-        return primary_rows
-
-    prefix = [fallback_rows[anchor_index]]
-    current_idx = anchor_index
-    while current_idx > 0:
-        current = datetime.strptime(fallback_rows[current_idx]["date"], "%Y-%m-%d")
-        previous = datetime.strptime(fallback_rows[current_idx - 1]["date"], "%Y-%m-%d")
-        if (current - previous).days > max_gap_days:
-            break
-        current_idx -= 1
-        prefix.append(fallback_rows[current_idx])
-
-    if (anchor_date - datetime.strptime(prefix[-1]["date"], "%Y-%m-%d")).days > max_gap_days:
-        return primary_rows
-
-    prefix = list(reversed(prefix))
-    return prefix + primary_rows
-
-
 def _yahoo_series_with_backfill(meta, symbol):
     rows = fetch_yahoo(meta["symbol"])
     hint_start = meta.get("hintStart", "")
@@ -932,10 +900,7 @@ def _yahoo_series_with_backfill(meta, symbol):
 
     if rows[0]["date"] <= fallback_rows[0]["date"]:
         return rows
-    merged = _trim_backfill_prefix(rows, fallback_rows)
-    if not merged:
-        return rows
-    return merged
+    return fallback_rows
 
 
 def get_series(asset_id, force_refresh=False):
