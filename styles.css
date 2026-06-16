@@ -952,6 +952,11 @@ h2 {
   background: var(--legend-hover);
 }
 
+.chart-legend button.highlighted-item {
+  background: var(--active-bg);
+  color: var(--active-text);
+}
+
 .chart-legend button.muted-item {
   color: var(--legend-muted);
   text-decoration: line-through;
@@ -1121,6 +1126,165 @@ h2 {
   color: var(--accent-2);
 }
 
+.comparison-panel {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.comparison-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.comparison-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.comparison-head strong {
+  color: var(--ink);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.comparison-exit-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+}
+
+.comparison-table-wrap {
+  overflow-x: auto;
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.comparison-table th,
+.comparison-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.comparison-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.comparison-table th button {
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.comparison-table th button:hover {
+  color: var(--active-text);
+}
+
+.comparison-table tbody tr:hover {
+  background: var(--legend-hover);
+}
+
+.comparison-table tr.highlighted-row {
+  background: var(--active-bg);
+}
+
+.comparison-table tr.muted-item {
+  color: var(--legend-muted);
+}
+
+.comparison-table tr.muted-item strong,
+.comparison-table tr.muted-item span {
+  color: var(--legend-muted);
+}
+
+.comparison-table td:first-child span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.comparison-table th:last-child,
+.comparison-table td:last-child {
+  width: 118px;
+  padding-right: 4px;
+  text-align: right;
+}
+
+.comparison-actions {
+  min-width: 118px;
+}
+
+.comparison-action-group {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(48px, 1fr));
+  gap: 1px;
+  min-width: 106px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-alt);
+  vertical-align: middle;
+}
+
+.comparison-action-group button {
+  min-height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--button-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.comparison-action-group button:first-child {
+  background: var(--apply-bg);
+  color: var(--active-text);
+  font-weight: 700;
+}
+
+.comparison-action-group button:hover {
+  background: var(--button-bg);
+  color: var(--active-text);
+}
+
+.comparison-current-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 106px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .lower-grid {
   display: grid;
   grid-template-columns: minmax(300px, 0.9fr) minmax(420px, 1.1fr);
@@ -1197,14 +1361,53 @@ h2 {
   margin: 8px 0;
 }
 
+.optimizer-card .opt-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 9px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-alt);
+}
+
 .optimizer-card button {
   min-height: 30px;
   width: 100%;
-  border-radius: 6px;
-  background: var(--apply-bg);
-  border-color: var(--apply-border);
-  color: var(--active-text);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--button-text);
+  font-size: 12px;
   font-weight: 700;
+}
+
+.optimizer-card .opt-action-primary {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 1px rgba(20, 35, 50, 0.12);
+}
+
+.optimizer-card .opt-action-secondary {
+  background: transparent;
+  color: var(--button-text);
+  font-weight: 600;
+}
+
+.optimizer-card .opt-action-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.optimizer-card .opt-action-secondary:hover {
+  background: var(--button-bg);
+  color: var(--active-text);
+}
+
+.optimizer-card .opt-action-secondary:disabled {
+  background: var(--active-bg);
+  color: var(--active-text);
+  opacity: 0.86;
 }
 
 .status {

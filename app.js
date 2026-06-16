@@ -24,6 +24,16 @@ const state = {
   theme: "light",
   themePreference: "system",
   shareDialog: null,
+  comparison: {
+    active: false,
+    items: [],
+    previousVisibleSeries: null,
+    hiddenKeys: [],
+    highlightedKey: "",
+    sortKey: "",
+    sortDirection: "desc",
+    pendingKey: "",
+  },
 };
 
 const els = {
@@ -54,6 +64,7 @@ const els = {
   optimizeBtn: document.getElementById("optimizeBtn"),
   optimizerResults: document.getElementById("optimizerResults"),
   resetZoomBtn: document.getElementById("resetZoomBtn"),
+  comparisonPanel: document.getElementById("comparisonPanel"),
   chartScaleModes: document.getElementById("chartScaleModes"),
   languageModes: document.getElementById("languageModes"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
@@ -166,6 +177,12 @@ const I18N = {
     added: "已添加",
     add: "添加",
     remove: "移除",
+    compare: "对比",
+    comparing: "已加入",
+    exitCompare: "退出对比",
+    compareMode: "对比模式",
+    currentPortfolio: "当前组合",
+    compareTableTitle: "组合对比",
     noFavorites: "暂无收藏",
     apply: "应用",
     delete: "删除",
@@ -313,6 +330,12 @@ const I18N = {
     added: "Added",
     add: "Add",
     remove: "Remove",
+    compare: "Compare",
+    comparing: "Added",
+    exitCompare: "Exit Compare",
+    compareMode: "Compare mode",
+    currentPortfolio: "Current portfolio",
+    compareTableTitle: "Portfolio comparison",
     noFavorites: "No saved portfolios",
     apply: "Apply",
     delete: "Delete",
@@ -610,6 +633,12 @@ function fmtMultiple(value, digits = 2) {
   return `${Number(value).toFixed(digits)}x`;
 }
 
+function fmtWithdrawalCagr(metrics) {
+  const withdrawal = metrics?.withdrawal4 || {};
+  if (withdrawal.depleted) return t("depleted");
+  return fmtPct(withdrawal.cagr);
+}
+
 function assetClassLabel(value) {
   const labels = {
     "US Equity": t("assetClassUSEquity"),
@@ -638,6 +667,128 @@ function rebalanceLabel(rule) {
   if (mode === "annual") return t("rebalanceAnnual");
   if (mode === "none") return t("rebalanceNone");
   return mode || t("rebalanceNone");
+}
+
+function weightsTextFromFractions(weights) {
+  return weights
+    .map((weight, i) => `${state.assets[i]?.id || ""} ${Math.round(Number(weight || 0) * 100)}%`)
+    .join(" / ");
+}
+
+function weightsTextFromPercents(assets) {
+  return assets
+    .map((asset) => `${asset.id} ${Math.round(Number(asset.weight || 0))}%`)
+    .join(" / ");
+}
+
+function comparisonKey(weights, rebalance) {
+  const weightPart = weights.map((weight) => Number(weight || 0).toFixed(4)).join(",");
+  return `${weightPart}|${rebalance?.mode || "none"}|${Number(rebalance?.threshold || 0).toFixed(4)}`;
+}
+
+function currentComparisonKey() {
+  return comparisonKey(
+    state.assets.map((asset) => Number(asset.weight || 0) / 100),
+    state.rebalance,
+  );
+}
+
+function profileComparisonKey(profile) {
+  return comparisonKey(profile.weights || [], profile.rebalance || {});
+}
+
+function isComparisonMode() {
+  return Boolean(state.comparison.active);
+}
+
+function comparisonEntries() {
+  if (!state.result) return [];
+  const current = {
+    key: currentComparisonKey(),
+    title: t("currentPortfolio"),
+    weightsText: weightsTextFromPercents(state.assets),
+    rebalance: state.rebalance,
+    result: state.result,
+    current: true,
+  };
+  return [current, ...sortedComparisonItems()];
+}
+
+function comparisonSortValue(entry, sortKey) {
+  const metrics = entry.result?.metrics || {};
+  if (sortKey === "portfolio") return entry.title || "";
+  if (sortKey === "rebalance") return rebalanceLabel(entry.rebalance);
+  if (sortKey === "cagr") return Number(metrics.cagr ?? -Infinity);
+  if (sortKey === "drawdown") return Number(metrics.maxDrawdown ?? -Infinity);
+  if (sortKey === "averageNav") return Number(metrics.averageNav ?? -Infinity);
+  if (sortKey === "withdrawal") {
+    const withdrawal = metrics.withdrawal4 || {};
+    return withdrawal.depleted ? -Infinity : Number(withdrawal.cagr ?? -Infinity);
+  }
+  return 0;
+}
+
+function sortedComparisonItems() {
+  const items = [...state.comparison.items];
+  const sortKey = state.comparison.sortKey;
+  if (!sortKey) return items;
+  const direction = state.comparison.sortDirection === "asc" ? 1 : -1;
+  return items.sort((a, b) => {
+    const av = comparisonSortValue(a, sortKey);
+    const bv = comparisonSortValue(b, sortKey);
+    if (typeof av === "string" || typeof bv === "string") {
+      return String(av).localeCompare(String(bv), state.language === "zh" ? "zh-CN" : "en") * direction;
+    }
+    return ((av > bv ? 1 : 0) - (av < bv ? 1 : 0)) * direction;
+  });
+}
+
+function comparisonSortIndicator(sortKey) {
+  if (state.comparison.sortKey !== sortKey) return "";
+  return state.comparison.sortDirection === "asc" ? " ↑" : " ↓";
+}
+
+function setComparisonSort(sortKey) {
+  if (state.comparison.sortKey === sortKey) {
+    state.comparison.sortDirection = state.comparison.sortDirection === "asc" ? "desc" : "asc";
+  } else {
+    state.comparison.sortKey = sortKey;
+    state.comparison.sortDirection = sortKey === "drawdown" ? "asc" : "desc";
+  }
+  renderAll();
+}
+
+function visibleComparisonEntries() {
+  const hidden = new Set(state.comparison.hiddenKeys || []);
+  const visible = comparisonEntries().filter((entry) => !hidden.has(entry.key));
+  return visible.length ? visible : comparisonEntries();
+}
+
+function isComparisonHidden(key) {
+  return (state.comparison.hiddenKeys || []).includes(key);
+}
+
+function setComparisonHidden(key, hidden) {
+  const hiddenKeys = new Set(state.comparison.hiddenKeys || []);
+  if (hidden) {
+    hiddenKeys.add(key);
+  } else {
+    hiddenKeys.delete(key);
+  }
+  state.comparison.hiddenKeys = Array.from(hiddenKeys);
+  if (hidden && state.comparison.highlightedKey === key) {
+    state.comparison.highlightedKey = "";
+  }
+}
+
+function setComparisonHighlight(key = "") {
+  state.comparison.highlightedKey = key;
+  document.querySelectorAll("[data-compare-key]").forEach((element) => {
+    const active = Boolean(key) && element.dataset.compareKey === key;
+    element.classList.toggle("highlighted-item", active && element.tagName === "BUTTON");
+    element.classList.toggle("highlighted-row", active && element.tagName === "TR");
+  });
+  renderChart();
 }
 
 function profileTitle(profile) {
@@ -1148,6 +1299,7 @@ function scheduleRun() {
 }
 
 function markBacktestDirty() {
+  clearComparisonForEdit();
   state.backtestDirty = true;
   updateInteractionLocks();
 }
@@ -1563,6 +1715,14 @@ function updateInteractionLocks() {
     button.disabled = busy;
   }
   for (const button of els.optimizerResults.querySelectorAll("button")) {
+    if (button.dataset.action === "compare") {
+      const pendingOther = Boolean(state.comparison.pendingKey) && button.dataset.compareKey !== state.comparison.pendingKey;
+      button.disabled = busy || state.optimizing || pendingOther || button.dataset.comparisonLocked === "true";
+    } else {
+      button.disabled = busy || state.optimizing;
+    }
+  }
+  for (const button of els.comparisonPanel?.querySelectorAll("button") || []) {
     button.disabled = busy || state.optimizing;
   }
   if (state.shareDialog) {
@@ -1647,6 +1807,7 @@ function renderAll() {
       drawChartMessage(t("equityCurve"), [], false);
     }
     clearChartLegend();
+    renderComparisonPanel();
     return;
   }
   renderMetrics();
@@ -1654,6 +1815,7 @@ function renderAll() {
   renderRebalanceTable();
   renderChart();
   renderLegend();
+  renderComparisonPanel();
 }
 
 function renderMetrics() {
@@ -1738,6 +1900,230 @@ function renderRebalanceTable() {
   els.rebalanceTable.innerHTML = html;
 }
 
+function comparisonPayload(profile) {
+  return {
+    assets: state.assets.map((asset, i) => ({
+      id: asset.id,
+      weight: Number(profile.weights?.[i] || 0) * 100,
+    })),
+    rebalance: profile.rebalance,
+    start: els.startInput.value || null,
+    end: els.endInput.value || null,
+  };
+}
+
+function enterComparisonMode() {
+  if (state.comparison.active) return;
+  state.comparison.active = true;
+  state.comparison.previousVisibleSeries = {
+    portfolio: state.visibleSeries.portfolio,
+    assets: { ...state.visibleSeries.assets },
+  };
+}
+
+function exitComparisonMode() {
+  if (state.comparison.previousVisibleSeries) {
+    state.visibleSeries = {
+      portfolio: state.comparison.previousVisibleSeries.portfolio !== false,
+      assets: { ...(state.comparison.previousVisibleSeries.assets || {}) },
+    };
+  }
+  state.comparison = {
+    active: false,
+    items: [],
+    previousVisibleSeries: null,
+    hiddenKeys: [],
+    highlightedKey: "",
+    sortKey: "",
+    sortDirection: "desc",
+    pendingKey: "",
+  };
+  if (els.comparisonPanel) {
+    els.comparisonPanel.hidden = true;
+    els.comparisonPanel.innerHTML = "";
+  }
+  renderChart();
+  renderLegend();
+  renderOptimizer(state.optimizerProfiles);
+}
+
+function clearComparisonForEdit() {
+  if (!isComparisonMode()) return;
+  if (state.comparison.previousVisibleSeries) {
+    state.visibleSeries = {
+      portfolio: state.comparison.previousVisibleSeries.portfolio !== false,
+      assets: { ...(state.comparison.previousVisibleSeries.assets || {}) },
+    };
+  }
+  state.comparison = {
+    active: false,
+    items: [],
+    previousVisibleSeries: null,
+    hiddenKeys: [],
+    highlightedKey: "",
+    sortKey: "",
+    sortDirection: "desc",
+    pendingKey: "",
+  };
+  if (els.comparisonPanel) {
+    els.comparisonPanel.hidden = true;
+    els.comparisonPanel.innerHTML = "";
+  }
+  if (state.result) {
+    renderChart();
+    renderLegend();
+  }
+}
+
+async function addProfileToComparison(profile) {
+  if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey) return;
+  enterComparisonMode();
+  const key = profileComparisonKey(profile);
+  const currentKey = currentComparisonKey();
+  if (key === currentKey || state.comparison.items.some((item) => item.key === key)) {
+    renderComparisonPanel();
+    renderOptimizer(state.optimizerProfiles);
+    return;
+  }
+  state.comparison.pendingKey = key;
+  refreshOptimizerCompareButtons();
+  try {
+    const result = await api("/api/backtest", {
+      method: "POST",
+      body: JSON.stringify(comparisonPayload(profile)),
+    });
+    state.comparison.items.push({
+      key,
+      title: profileTitle(profile),
+      weights: profile.weights,
+      weightsText: weightsTextFromFractions(profile.weights || []),
+      rebalance: profile.rebalance,
+      result,
+    });
+    renderAll();
+  } catch (error) {
+    renderComparisonPanel(error.message || t("requestFailed"));
+  } finally {
+    state.comparison.pendingKey = "";
+    refreshOptimizerCompareButtons();
+  }
+}
+
+async function applyWeightsAndRebalance(weights, rebalance) {
+  if (state.loading || state.optimizing) return;
+  const scrollSnapshot = captureScrollState();
+  weights.forEach((weight, i) => {
+    state.assets[i].weight = weight * 100;
+  });
+  state.rebalance = {
+    mode: rebalance.mode,
+    threshold: rebalance.threshold,
+  };
+  els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
+  renderAssets();
+  renderModes();
+  refreshSearchSelectionState();
+  saveState();
+  await runBacktest(true);
+  if (isComparisonMode()) {
+    const key = currentComparisonKey();
+    state.comparison.items = state.comparison.items.filter((item) => item.key !== key);
+    state.comparison.hiddenKeys = state.comparison.hiddenKeys.filter((hiddenKey) => hiddenKey !== key);
+    if (state.comparison.highlightedKey === key) state.comparison.highlightedKey = "";
+    renderAll();
+    renderOptimizer(state.optimizerProfiles);
+  }
+  restoreScrollState(scrollSnapshot);
+}
+
+function removeComparisonItem(key) {
+  state.comparison.items = state.comparison.items.filter((item) => item.key !== key);
+  state.comparison.hiddenKeys = state.comparison.hiddenKeys.filter((hiddenKey) => hiddenKey !== key);
+  if (state.comparison.highlightedKey === key) state.comparison.highlightedKey = "";
+  if (!state.comparison.items.length) {
+    exitComparisonMode();
+    return;
+  }
+  renderAll();
+  renderOptimizer(state.optimizerProfiles);
+}
+
+function renderComparisonPanel(message = "") {
+  if (!els.comparisonPanel || !isComparisonMode() || !state.result) {
+    if (els.comparisonPanel) els.comparisonPanel.hidden = true;
+    return;
+  }
+  const entries = comparisonEntries();
+  els.comparisonPanel.hidden = false;
+  const rows = entries
+    .map((entry) => {
+      const metrics = entry.result.metrics || {};
+      const action = entry.current
+        ? `<span class="comparison-current-mark">${escapeHtml(t("currentPortfolio"))}</span>`
+        : `<button type="button" data-action="apply" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("apply"))}</button>
+           <button type="button" data-action="remove" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("remove"))}</button>`;
+      const hidden = isComparisonHidden(entry.key);
+      return `
+        <tr data-compare-key="${escapeHtml(entry.key)}" class="${hidden ? "muted-item" : ""}">
+          <td><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(entry.weightsText)}</span></td>
+          <td>${escapeHtml(rebalanceLabel(entry.rebalance))}</td>
+          <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
+          <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
+          <td>${escapeHtml(fmtMultiple(metrics.averageNav))}</td>
+          <td>${escapeHtml(fmtWithdrawalCagr(metrics))}</td>
+          <td class="comparison-actions"><div class="comparison-action-group">${action}</div></td>
+        </tr>
+      `;
+    })
+    .join("");
+  els.comparisonPanel.innerHTML = `
+    <div class="comparison-head">
+      <div>
+        <strong>${escapeHtml(t("compareTableTitle"))}</strong>
+        ${message ? `<span class="error">${escapeHtml(message)}</span>` : `<span>${escapeHtml(t("compareMode"))}</span>`}
+      </div>
+      <button class="ghost-btn comparison-exit-btn" type="button" data-action="exit-compare">${escapeHtml(t("exitCompare"))}</button>
+    </div>
+    <div class="comparison-table-wrap">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th><button type="button" data-sort="portfolio">${escapeHtml(t("portfolio"))}${escapeHtml(comparisonSortIndicator("portfolio"))}</button></th>
+            <th><button type="button" data-sort="rebalance">${escapeHtml(t("rebalance"))}${escapeHtml(comparisonSortIndicator("rebalance"))}</button></th>
+            <th><button type="button" data-sort="cagr">${escapeHtml(t("annualShort"))}${escapeHtml(comparisonSortIndicator("cagr"))}</button></th>
+            <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>
+            <th><button type="button" data-sort="averageNav">${escapeHtml(t("averageNavShort"))}${escapeHtml(comparisonSortIndicator("averageNav"))}</button></th>
+            <th><button type="button" data-sort="withdrawal">${escapeHtml(t("withdrawal4Short"))}${escapeHtml(comparisonSortIndicator("withdrawal"))}</button></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+  els.comparisonPanel.querySelectorAll("button[data-sort]").forEach((button) => {
+    button.addEventListener("click", () => setComparisonSort(button.dataset.sort));
+  });
+  els.comparisonPanel.querySelector('button[data-action="exit-compare"]')?.addEventListener("click", exitComparisonMode);
+  els.comparisonPanel.querySelectorAll("button[data-action]").forEach((button) => {
+    if (button.dataset.action === "exit-compare") return;
+    button.disabled = state.loading || state.optimizing;
+    button.addEventListener("click", () => {
+      const item = state.comparison.items.find((candidate) => candidate.key === button.dataset.key);
+      if (!item) return;
+      if (button.dataset.action === "remove") {
+        removeComparisonItem(item.key);
+      } else {
+        applyWeightsAndRebalance(item.weights, item.rebalance);
+      }
+    });
+  });
+  els.comparisonPanel.querySelectorAll("tr[data-compare-key]").forEach((row) => {
+    row.addEventListener("pointerenter", () => setComparisonHighlight(row.dataset.compareKey));
+    row.addEventListener("pointerleave", () => setComparisonHighlight(""));
+  });
+}
+
 function renderLegend() {
   if (!state.result) return;
   let legend = document.getElementById("chartLegend");
@@ -1748,6 +2134,16 @@ function renderLegend() {
     document.querySelector(".chart-panel").appendChild(legend);
     legend.addEventListener("click", (event) => {
       const item = event.target.closest("button[data-series]");
+      const compareItem = event.target.closest("button[data-compare-key]");
+      if (compareItem && state.result && isComparisonMode()) {
+        const key = compareItem.dataset.compareKey;
+        if (!isComparisonHidden(key) && visibleComparisonEntries().length <= 1) return;
+        setComparisonHidden(key, !isComparisonHidden(key));
+        renderChart();
+        renderLegend();
+        renderComparisonPanel();
+        return;
+      }
       if (!item || !state.result) return;
       const series = item.dataset.series;
       if (series === "portfolio") {
@@ -1760,6 +2156,40 @@ function renderLegend() {
       renderChart();
       renderLegend();
     });
+    const handleCompareHover = (event) => {
+      const compareItem = event.target.closest("button[data-compare-key]");
+      if (compareItem && isComparisonMode()) {
+        setComparisonHighlight(isComparisonHidden(compareItem.dataset.compareKey) ? "" : compareItem.dataset.compareKey);
+      }
+    };
+    legend.addEventListener("pointerover", handleCompareHover);
+    legend.addEventListener("mousemove", handleCompareHover);
+    legend.addEventListener("pointerout", (event) => {
+      const compareItem = event.target.closest("button[data-compare-key]");
+      if (compareItem && !compareItem.contains(event.relatedTarget)) {
+        setComparisonHighlight("");
+      }
+    });
+    legend.addEventListener("mouseleave", () => setComparisonHighlight(""));
+  }
+  if (isComparisonMode()) {
+    const entries = comparisonEntries();
+    legend.innerHTML = `
+      <div class="chart-legend-series">
+        ${entries
+          .map(
+            (entry, idx) => {
+              const hidden = isComparisonHidden(entry.key);
+              const highlighted = state.comparison.highlightedKey === entry.key;
+              return `<button type="button" data-compare-key="${escapeHtml(entry.key)}" class="${hidden ? "muted-item" : ""} ${highlighted ? "highlighted-item" : ""}">
+                <i style="background:${idx === 0 ? "var(--accent-2)" : palette[(idx + 1) % palette.length]}"></i>${escapeHtml(entry.title)}
+              </button>`;
+            },
+          )
+          .join("")}
+      </div>
+    `;
+    return;
   }
   const assetItems = state.result.assets
     .map(
@@ -1828,7 +2258,10 @@ function renderChart() {
 
   const cssWidth = width / dpr;
   const cssHeight = height / dpr;
-  const drawdownHeight = 80;
+  const compareMode = isComparisonMode();
+  const allCompareEntries = compareMode ? comparisonEntries() : [];
+  const compareEntries = compareMode ? visibleComparisonEntries() : [];
+  const drawdownHeight = compareMode ? 0 : 80;
   const drawdownBottomMargin = 20;
   const drawdownTop = cssHeight - drawdownBottomMargin - drawdownHeight;
   const pad = { left: 58, right: 18, top: 22, bottom: cssHeight - drawdownTop + 56 };
@@ -1839,15 +2272,18 @@ function renderChart() {
   const drawdowns = state.result.drawdowns.slice(start, end + 1);
   const dates = state.result.dates.slice(start, end + 1);
   const full = state.result.metrics;
-  els.rangeLabel.textContent = `${t("currentView")} ${state.result.dates[start]} ${t("to")} ${state.result.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
+  els.rangeLabel.textContent = compareMode
+    ? `${t("compareMode")} · ${t("currentView")} ${state.result.dates[start]} ${t("to")} ${state.result.dates[end]}`
+    : `${t("currentView")} ${state.result.dates[start]} ${t("to")} ${state.result.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
   const assetSeries = state.result.assetSeries.map((series) => series.slice(start, end + 1));
   const portfolioVisible = state.visibleSeries.portfolio !== false;
   const visibleAssetSeries = assetSeries.filter(
     (_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false,
   );
+  const compareSeries = compareEntries.map((entry) => entry.result.nav.slice(start, end + 1));
   const allValues = [
-    ...(portfolioVisible ? nav : []),
-    ...visibleAssetSeries.flat(),
+    ...(compareMode ? compareSeries.flat() : portfolioVisible ? nav : []),
+    ...(compareMode ? [] : visibleAssetSeries.flat()),
   ];
   if (!allValues.length) {
     allValues.push(...nav);
@@ -1867,6 +2303,38 @@ function renderChart() {
   const displayValue = (scaledValue) => (useLogScale ? Math.exp(scaledValue) : scaledValue);
   const x = (i) => pad.left + (i / Math.max(1, nav.length - 1)) * plotW;
   const y = (value) => pad.top + (1 - (scaleValue(value) - plotMin) / (plotMax - plotMin)) * plotH;
+  const targetPlotPoints = Math.max(32, Math.floor(plotW / 2));
+  const samplePlotPoints = (series, mode = "average") => {
+    if (series.length <= targetPlotPoints * 1.25) {
+      return series.map((value, i) => ({ i, value }));
+    }
+    const points = [{ i: 0, value: series[0] }];
+    const bucketSize = (series.length - 1) / Math.max(1, targetPlotPoints - 1);
+    for (let bucket = 1; bucket < targetPlotPoints - 1; bucket++) {
+      const startIdx = Math.max(1, Math.floor(bucket * bucketSize));
+      const endIdx = Math.min(series.length - 2, Math.floor((bucket + 1) * bucketSize));
+      if (endIdx < startIdx) continue;
+      let value = series[startIdx];
+      if (mode === "min") {
+        for (let i = startIdx + 1; i <= endIdx; i++) value = Math.min(value, series[i]);
+      } else if (mode === "max") {
+        for (let i = startIdx + 1; i <= endIdx; i++) value = Math.max(value, series[i]);
+      } else {
+        let total = 0;
+        for (let i = startIdx; i <= endIdx; i++) total += series[i];
+        value = total / (endIdx - startIdx + 1);
+      }
+      points.push({ i: Math.round((startIdx + endIdx) / 2), value });
+    }
+    points.push({ i: series.length - 1, value: series[series.length - 1] });
+    return points;
+  };
+  const drawSampledSeries = (series, valueToY = y, mode = "average") => {
+    samplePlotPoints(series, mode).forEach((point, idx) => {
+      if (idx === 0) ctx.moveTo(x(point.i), valueToY(point.value));
+      else ctx.lineTo(x(point.i), valueToY(point.value));
+    });
+  };
   const localHoverIndex =
     state.hoverIndex === null
       ? null
@@ -1893,26 +2361,36 @@ function renderChart() {
     ctx.fillText(value.toFixed(2), pad.left - 8, pad.top + (plotH / 4) * i + 4);
   }
 
-  assetSeries.forEach((series, idx) => {
-    if (state.visibleSeries.assets[state.result.assets[idx].id] === false) return;
-    ctx.strokeStyle = palette[(idx + 1) % palette.length] + "88";
-    ctx.lineWidth = 1.25;
-    ctx.beginPath();
-    series.forEach((value, i) => {
-      if (i === 0) ctx.moveTo(x(i), y(value));
-      else ctx.lineTo(x(i), y(value));
+  if (compareMode) {
+    compareSeries.forEach((series, idx) => {
+      const entry = compareEntries[idx];
+      const originalIndex = Math.max(0, allCompareEntries.findIndex((candidate) => candidate.key === entry.key));
+      const highlighted = state.comparison.highlightedKey && state.comparison.highlightedKey !== entry.key;
+      ctx.save();
+      ctx.globalAlpha = highlighted ? 0.22 : 1;
+      ctx.strokeStyle = originalIndex === 0 ? chartColors.portfolio : palette[(originalIndex + 1) % palette.length];
+      ctx.lineWidth = state.comparison.highlightedKey === entry.key ? 3.4 : originalIndex === 0 ? 2.4 : 1.8;
+      ctx.beginPath();
+      drawSampledSeries(series);
+      ctx.stroke();
+      ctx.restore();
     });
-    ctx.stroke();
-  });
+  } else {
+    assetSeries.forEach((series, idx) => {
+      if (state.visibleSeries.assets[state.result.assets[idx].id] === false) return;
+      ctx.strokeStyle = palette[(idx + 1) % palette.length] + "88";
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      drawSampledSeries(series);
+      ctx.stroke();
+    });
+  }
 
-  if (portfolioVisible) {
+  if (!compareMode && portfolioVisible) {
     ctx.strokeStyle = chartColors.portfolio;
     ctx.lineWidth = 2.2;
     ctx.beginPath();
-    nav.forEach((value, i) => {
-      if (i === 0) ctx.moveTo(x(i), y(value));
-      else ctx.lineTo(x(i), y(value));
-    });
+    drawSampledSeries(nav);
     ctx.stroke();
 
     const drawdownHighlight = 0.10;
@@ -1920,13 +2398,14 @@ function renderChart() {
     ctx.lineWidth = 2.6;
     ctx.beginPath();
     let active = false;
-    for (let i = 1; i < nav.length; i++) {
-      if (drawdowns[i] <= -drawdownHighlight) {
+    for (const point of samplePlotPoints(nav)) {
+      if (point.i === 0) continue;
+      if (drawdowns[point.i] <= -drawdownHighlight) {
         if (!active) {
-          ctx.moveTo(x(i - 1), y(nav[i - 1]));
+          ctx.moveTo(x(Math.max(0, point.i - 1)), y(nav[Math.max(0, point.i - 1)]));
           active = true;
         }
-        ctx.lineTo(x(i), y(nav[i]));
+        ctx.lineTo(x(point.i), y(point.value));
       } else {
         active = false;
       }
@@ -1939,7 +2418,7 @@ function renderChart() {
   ctx.fillStyle = chartColors.warning;
   ctx.lineWidth = 1;
   dates.forEach((date, i) => {
-    if (!portfolioVisible || !eventDates.has(date)) return;
+    if (compareMode || !portfolioVisible || !eventDates.has(date)) return;
     const px = x(i);
     ctx.setLineDash([3, 4]);
     ctx.beginPath();
@@ -1961,7 +2440,7 @@ function renderChart() {
     ctx.fillText(dates[idx], x(idx), bottomY);
   });
 
-  if (portfolioVisible) {
+  if (!compareMode && portfolioVisible) {
     const ddTop = drawdownTop;
     const ddHeight = drawdownHeight;
     const ddBottom = ddTop + ddHeight;
@@ -1988,8 +2467,8 @@ function renderChart() {
     ctx.fillStyle = chartColors.drawdownSoftFill;
     ctx.beginPath();
     ctx.moveTo(pad.left, ddTop);
-    drawdowns.forEach((dd, i) => {
-      ctx.lineTo(x(i), ddY(dd));
+    samplePlotPoints(drawdowns, "min").forEach((point) => {
+      ctx.lineTo(x(point.i), ddY(point.value));
     });
     ctx.lineTo(pad.left + plotW, ddTop);
     ctx.closePath();
@@ -1998,10 +2477,7 @@ function renderChart() {
     ctx.strokeStyle = chartColors.danger;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    drawdowns.forEach((dd, i) => {
-      if (i === 0) ctx.moveTo(x(i), ddY(dd));
-      else ctx.lineTo(x(i), ddY(dd));
-    });
+    drawSampledSeries(drawdowns, ddY, "min");
     ctx.stroke();
     ctx.strokeStyle = chartColors.baseline;
     ctx.beginPath();
@@ -2074,14 +2550,23 @@ function showTooltip(event) {
   const nav = state.result.nav[idx];
   const dd = state.result.drawdowns[idx];
   const weights = state.result.weightsTimeline[idx] || [];
-  els.tooltip.innerHTML = `
-    <strong>${date}</strong><br>
-    ${t("nav")} ${nav.toFixed(3)}<br>
-    ${t("drawdown")} ${fmtPct(dd)}<br>
-    ${weights
-      .map((weight, i) => `${state.result.assets[i].id} ${fmtPct(weight, 1)}`)
-      .join("<br>")}
-  `;
+  if (isComparisonMode()) {
+    els.tooltip.innerHTML = `
+      <strong>${date}</strong><br>
+      ${visibleComparisonEntries()
+        .map((entry) => `${escapeHtml(entry.title)} ${fmtNum(entry.result.nav[idx], 3)}`)
+        .join("<br>")}
+    `;
+  } else {
+    els.tooltip.innerHTML = `
+      <strong>${date}</strong><br>
+      ${t("nav")} ${nav.toFixed(3)}<br>
+      ${t("drawdown")} ${fmtPct(dd)}<br>
+      ${weights
+        .map((weight, i) => `${state.result.assets[i].id} ${fmtPct(weight, 1)}`)
+        .join("<br>")}
+    `;
+  }
   els.tooltip.style.display = "block";
 
   const panel = els.tooltip.parentElement;
@@ -2150,11 +2635,12 @@ function renderOptimizer(profiles) {
     const card = document.createElement("div");
     card.className = "optimizer-card";
     const m = profile.metrics;
-    const weightsText = profile.weights
-      .map((weight, i) => `${state.assets[i].id} ${Math.round(weight * 100)}%`)
-      .join(" / ");
+    const weightsText = weightsTextFromFractions(profile.weights);
     const rule =
       rebalanceLabel(profile.rebalance);
+    const compareKey = profileComparisonKey(profile);
+    const alreadyComparing =
+      isComparisonMode() && (compareKey === currentComparisonKey() || state.comparison.items.some((item) => item.key === compareKey));
     card.innerHTML = `
       <div class="opt-head">
         <strong>${profileTitle(profile)}</strong>
@@ -2167,29 +2653,37 @@ function renderOptimizer(profiles) {
         <span>${t("sharpeShort")} ${fmtNum(m.sharpe0)}</span>
         <span>${t("averageNavShort")} ${fmtMultiple(m.averageNav)}</span>
       </div>
-      <button type="button">${t("apply")}</button>
+      <div class="opt-actions">
+        <button class="opt-action-primary" type="button" data-action="apply">${t("apply")}</button>
+        <button class="opt-action-secondary" type="button" data-action="compare">${alreadyComparing ? t("comparing") : t("compare")}</button>
+      </div>
     `;
-    card.querySelector("button").disabled = state.loading || state.optimizing;
-    card.querySelector("button").addEventListener("click", async () => {
-      if (state.loading || state.optimizing) return;
-      const scrollSnapshot = captureScrollState();
-      profile.weights.forEach((weight, i) => {
-        state.assets[i].weight = weight * 100;
-      });
-      state.rebalance = {
-        mode: profile.rebalance.mode,
-        threshold: profile.rebalance.threshold,
-      };
-      els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
-      renderAssets();
-      renderModes();
-      refreshSearchSelectionState();
-      saveState();
-      await runBacktest(true);
-      restoreScrollState(scrollSnapshot);
+    const applyButton = card.querySelector('button[data-action="apply"]');
+    const compareButton = card.querySelector('button[data-action="compare"]');
+    compareButton.dataset.compareKey = compareKey;
+    applyButton.disabled = state.loading || state.optimizing;
+    compareButton.disabled = state.loading || state.optimizing || alreadyComparing;
+    compareButton.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
+    applyButton.addEventListener("click", () => {
+      applyWeightsAndRebalance(profile.weights, profile.rebalance);
+    });
+    compareButton.addEventListener("click", () => {
+      addProfileToComparison(profile);
     });
     els.optimizerResults.appendChild(card);
   }
+}
+
+function refreshOptimizerCompareButtons() {
+  els.optimizerResults.querySelectorAll('button[data-action="compare"]').forEach((button) => {
+    const key = button.dataset.compareKey || "";
+    const alreadyComparing =
+      isComparisonMode() && (key === currentComparisonKey() || state.comparison.items.some((item) => item.key === key));
+    const pending = state.comparison.pendingKey === key;
+    button.textContent = pending ? t("backtesting") : alreadyComparing ? t("comparing") : t("compare");
+    button.disabled = state.loading || state.optimizing || alreadyComparing || Boolean(state.comparison.pendingKey);
+    button.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
+  });
 }
 
 function bindEvents() {
@@ -2255,10 +2749,12 @@ function bindEvents() {
     scheduleRun();
   });
   els.startInput.addEventListener("change", () => {
+    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
   els.endInput.addEventListener("change", () => {
+    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
@@ -2302,6 +2798,7 @@ function bindEvents() {
     els.startInput.value = "";
     els.endInput.value = "";
     state.view = { start: 0, end: state.result.dates.length - 1 };
+    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
