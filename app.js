@@ -812,6 +812,10 @@ function shareSubtitleForMode(mode) {
   return t("shareDraftHint");
 }
 
+function receivedShareSubtitle(portfolio) {
+  return `${shareDateText(portfolio)} · ${rebalanceLabel(portfolio.rebalance)}`;
+}
+
 function drawShareCurve(portfolio) {
   const canvas = els.shareCurveCanvas;
   const ctx = canvas.getContext("2d");
@@ -882,8 +886,9 @@ function renderShareDialog() {
   els.shareOverlay.dataset.mode = dialog.mode;
   document.getElementById("shareTitle").textContent =
     dialog.mode === "received" ? portfolio.name || t("sharedPortfolio") : shareTitleForMode(dialog.mode);
-  els.shareSubtitle.textContent = shareSubtitleForMode(dialog.mode);
-  els.shareSubtitle.style.display = dialog.mode === "received" ? "none" : "";
+  els.shareSubtitle.textContent =
+    dialog.mode === "received" ? receivedShareSubtitle(portfolio) : shareSubtitleForMode(dialog.mode);
+  els.shareSubtitle.style.display = "";
   els.shareNameRow.style.display = dialog.mode === "draft" ? "grid" : "none";
   if (dialog.mode === "draft" && els.shareNameInput.value !== portfolio.name) {
     els.shareNameInput.value = portfolio.name || "";
