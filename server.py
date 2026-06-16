@@ -528,6 +528,18 @@ def fetch_fund_profile(code):
     return dict(profile)
 
 
+def lookup_catalog_hint_start(symbol):
+    key = str(symbol or "").upper()
+    if not key:
+        return ""
+    for item in CATALOG:
+        if item.get("source") == "yahoo" and item.get("symbol", "").upper() == key:
+            hint = item.get("hintStart") or ""
+            if hint:
+                return hint
+    return ""
+
+
 def dynamic_fund_hint_start(code):
     return CATALOG_BY_ID.get(code, {}).get("hintStart") or ""
 
@@ -578,6 +590,7 @@ def get_dynamic_yahoo_meta(asset_id):
     if not asset_id.startswith("Y:"):
         return None
     symbol = asset_id[2:]
+    hint_start = lookup_catalog_hint_start(symbol)
     return {
         "id": asset_id,
         "symbol": symbol,
@@ -585,7 +598,7 @@ def get_dynamic_yahoo_meta(asset_id):
         "assetClass": "Yahoo",
         "source": "yahoo",
         "currency": "",
-        "hintStart": "",
+        "hintStart": hint_start,
         "keywords": symbol,
         "dynamic": True,
     }
@@ -849,7 +862,24 @@ def _series_starts_too_late(asset_id, rows, hint_start=""):
 
 def _yahoo_series_with_backfill(meta, symbol):
     rows = fetch_yahoo(meta["symbol"])
-    if not _series_starts_too_late(meta["id"], rows, meta.get("hintStart", "")):
+    hint_start = meta.get("hintStart", "")
+    if not hint_start or _series_starts_too_late(meta["id"], rows, hint_start):
+        if not hint_start:
+            log_event(
+                "market.series.start_fallback",
+                symbol=meta["id"],
+                reason="missing_hint",
+            )
+        else:
+            log_event(
+                "market.series.start_fallback",
+                symbol=meta["id"],
+                reason="drift",
+                start=rows[0]["date"],
+                expected_hint=hint_start,
+                count=len(rows),
+            )
+    else:
         return rows
 
     log_event(
@@ -865,9 +895,12 @@ def _yahoo_series_with_backfill(meta, symbol):
     except Exception:
         return rows
 
-    if not _series_starts_too_late(meta["id"], fallback_rows, meta.get("hintStart", "")):
+    if not rows:
         return fallback_rows
-    return rows if rows[0]["date"] <= fallback_rows[0]["date"] else fallback_rows
+
+    if rows[0]["date"] <= fallback_rows[0]["date"]:
+        return rows
+    return fallback_rows
 
 
 def get_series(asset_id, force_refresh=False):
