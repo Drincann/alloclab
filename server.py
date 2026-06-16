@@ -140,6 +140,16 @@ FUND_LIST_ERROR = None
 FUND_START_CACHE = {}
 YAHOO_SEARCH_DISABLED_UNTIL = 0
 YAHOO_SEARCH_COOLDOWN_SECONDS = 5 * 60
+BITCOIN_YAHOO_FALLBACKS = [
+    {"symbol": "BTC-USD", "name": "Bitcoin USD", "assetClass": "CRYPTOCURRENCY", "currency": "USD"},
+    {"symbol": "BTC=F", "name": "Bitcoin Futures", "assetClass": "FUTURE", "currency": "USD"},
+    {"symbol": "GBTC", "name": "Grayscale Bitcoin Trust (BTC)", "assetClass": "ETF", "currency": "USD"},
+    {"symbol": "BTC-EUR", "name": "Bitcoin EUR", "assetClass": "CRYPTOCURRENCY", "currency": "EUR"},
+]
+YAHOO_SYMBOL_FALLBACKS = {
+    "btc": BITCOIN_YAHOO_FALLBACKS,
+    "bitcoin": BITCOIN_YAHOO_FALLBACKS,
+}
 ACCESS_KEY_ENV = "ALLOCLAB_ACCESS_KEY"
 KEY_HELP_URL_ENV = "ALLOCLAB_KEY_HELP_URL"
 LEGACY_ACCESS_KEY_ENV = "PORTFOLIO_APP_ACCESS_KEY"
@@ -294,33 +304,44 @@ def looks_like_ticker_query(query):
     return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]{0,9}", key))
 
 
+def yahoo_symbol_fallback_candidates(query):
+    key = query.strip().lower()
+    if key in YAHOO_SYMBOL_FALLBACKS:
+        return YAHOO_SYMBOL_FALLBACKS[key]
+    if looks_like_ticker_query(query):
+        symbol = query.strip().upper()
+        return [{"symbol": symbol, "name": symbol, "assetClass": "Yahoo", "currency": ""}]
+    return []
+
+
 def yahoo_symbol_fallback_search(query):
-    if not looks_like_ticker_query(query):
-        return []
-    symbol = query.strip().upper()
-    asset_id = f"Y:{symbol}"
-    try:
-        hint = asset_start_hint(asset_id)
-    except Exception as exc:
-        log_event("search.symbol_fallback.error", query=query, error=type(exc).__name__)
-        return []
-    if not hint or not hint.get("hintStart") or hint.get("hintStart") == "不可用":
-        return []
-    return [
-        {
-            "id": asset_id,
-            "symbol": symbol,
-            "name": symbol,
-            "assetClass": "Yahoo",
-            "source": "yahoo",
-            "currency": hint.get("currency") or "",
-            "hintStart": hint.get("hintStart") or "",
-            "lastDate": hint.get("lastDate") or "",
-            "dataCount": int(hint.get("dataCount") or 0),
-            "keywords": symbol,
-            "dynamic": True,
-        }
-    ]
+    items = []
+    for candidate in yahoo_symbol_fallback_candidates(query):
+        symbol = candidate["symbol"].upper()
+        asset_id = f"Y:{symbol}"
+        try:
+            hint = asset_start_hint(asset_id)
+        except Exception as exc:
+            log_event("search.symbol_fallback.error", query=query, symbol=symbol, error=type(exc).__name__)
+            continue
+        if not hint or not hint.get("hintStart") or hint.get("hintStart") == "不可用":
+            continue
+        items.append(
+            {
+                "id": asset_id,
+                "symbol": symbol,
+                "name": candidate.get("name") or symbol,
+                "assetClass": candidate.get("assetClass") or hint.get("assetClass") or "Yahoo",
+                "source": "yahoo",
+                "currency": candidate.get("currency") or hint.get("currency") or "",
+                "hintStart": hint.get("hintStart") or "",
+                "lastDate": hint.get("lastDate") or "",
+                "dataCount": int(hint.get("dataCount") or 0),
+                "keywords": f"{symbol} {candidate.get('name') or ''}",
+                "dynamic": True,
+            }
+        )
+    return items
 
 
 def append_search_items(items, existing, candidates, limit):
