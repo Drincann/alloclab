@@ -2094,11 +2094,11 @@ function bindEvents() {
   });
   els.startInput.addEventListener("change", () => {
     saveState();
-    markBacktestDirty();
+    runBacktest(true);
   });
   els.endInput.addEventListener("change", () => {
     saveState();
-    markBacktestDirty();
+    runBacktest(true);
   });
   els.modes.addEventListener("click", (event) => {
     if (state.loading) return;
@@ -2181,7 +2181,7 @@ function bindEvents() {
         els.endInput.value = state.result.dates[b];
         state.view = null;
         saveState();
-        markBacktestDirty();
+        runBacktest(true);
         return;
       }
     }
