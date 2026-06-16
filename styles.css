@@ -180,6 +180,13 @@ body {
   font-size: 13px;
 }
 
+.share-overlay[data-mode="received"] .share-head h2 {
+  max-width: min(520px, 72vw);
+  overflow-wrap: anywhere;
+  font-size: 28px;
+  line-height: 1.12;
+}
+
 .share-name-row {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr);
