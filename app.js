@@ -20,6 +20,7 @@ const state = {
   bootstrapped: false,
   language: "zh",
   theme: "light",
+  sharePreview: null,
 };
 
 const els = {
@@ -53,6 +54,16 @@ const els = {
   chartScaleModes: document.getElementById("chartScaleModes"),
   languageModes: document.getElementById("languageModes"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
+  shareCurrentBtn: document.getElementById("shareCurrentBtn"),
+  shareOverlay: document.getElementById("shareOverlay"),
+  shareCloseBtn: document.getElementById("shareCloseBtn"),
+  shareSubtitle: document.getElementById("shareSubtitle"),
+  shareSummary: document.getElementById("shareSummary"),
+  shareMetrics: document.getElementById("shareMetrics"),
+  shareLinkInput: document.getElementById("shareLinkInput"),
+  shareCopyBtn: document.getElementById("shareCopyBtn"),
+  shareStatus: document.getElementById("shareStatus"),
+  shareApplyBtn: document.getElementById("shareApplyBtn"),
   rangeLabel: document.getElementById("rangeLabel"),
   chartTitle: document.getElementById("chartTitle"),
 };
@@ -86,6 +97,17 @@ const I18N = {
     normalize: "归一化",
     favorites: "收藏组合",
     save: "保存",
+    share: "分享",
+    sharePreview: "分享预览",
+    shareLink: "分享链接",
+    copy: "复制",
+    copied: "已复制",
+    close: "关闭",
+    applyToView: "应用到当前视图",
+    sharedPortfolio: "分享组合",
+    createShareFailed: "生成分享链接失败",
+    loadShareFailed: "分享链接读取失败",
+    noShareMetrics: "暂无回测指标",
     favoriteName: "组合名称",
     rebalance: "再平衡",
     rebalanceNone: "不再平衡",
@@ -193,6 +215,17 @@ const I18N = {
     normalize: "Normalize",
     favorites: "Saved portfolios",
     save: "Save",
+    share: "Share",
+    sharePreview: "Share Preview",
+    shareLink: "Share link",
+    copy: "Copy",
+    copied: "Copied",
+    close: "Close",
+    applyToView: "Apply to current view",
+    sharedPortfolio: "Shared portfolio",
+    createShareFailed: "Failed to create share link",
+    loadShareFailed: "Failed to load share link",
+    noShareMetrics: "No backtest metrics yet",
     favoriteName: "Portfolio name",
     rebalance: "Rebalance",
     rebalanceNone: "No rebalance",
@@ -406,6 +439,7 @@ function rerenderLocalizedContent() {
   } else if (state.bootstrapped) {
     els.chartTitle.textContent = t("equityCurve");
   }
+  renderSharePreview();
   updateInteractionLocks();
 }
 
@@ -646,6 +680,159 @@ function currentFavoriteSnapshot(name) {
   };
 }
 
+function currentMetricSnapshot() {
+  if (!state.result?.metrics) return null;
+  const m = state.result.metrics;
+  return {
+    start: m.start || "",
+    end: m.end || "",
+    cagr: m.cagr,
+    totalReturn: m.totalReturn,
+    maxDrawdown: m.maxDrawdown,
+    volatility: m.volatility,
+    sharpe0: m.sharpe0,
+    calmar: m.calmar,
+    years: m.years,
+  };
+}
+
+function currentShareSnapshot(name = "") {
+  const snapshot = currentFavoriteSnapshot(name || t("sharedPortfolio"));
+  const metrics = currentMetricSnapshot();
+  if (metrics) snapshot.metrics = metrics;
+  return snapshot;
+}
+
+function shareUrlForToken(token) {
+  const url = new URL(window.location.href);
+  url.search = `?share=${encodeURIComponent(token)}`;
+  url.hash = "";
+  return url.toString();
+}
+
+function shareTokenFromUrl() {
+  return new URLSearchParams(window.location.search).get("share") || "";
+}
+
+function shareAssetText(portfolio) {
+  return (portfolio.assets || [])
+    .map((asset) => `${asset.id} ${Math.round(Number(asset.weight || 0))}%`)
+    .join(" / ");
+}
+
+function shareDateText(portfolio) {
+  if (portfolio.start && portfolio.end) return `${portfolio.start} ${t("to")} ${portfolio.end}`;
+  if (portfolio.start) return `${t("start")} ${portfolio.start}`;
+  if (portfolio.end) return `${t("end")} ${portfolio.end}`;
+  const metrics = portfolio.metrics || {};
+  if (metrics.start && metrics.end) return `${metrics.start} ${t("to")} ${metrics.end}`;
+  return t("none");
+}
+
+function shareMetricRows(portfolio) {
+  const metrics = portfolio.metrics || {};
+  if (!Object.keys(metrics).length) return [];
+  return [
+    [t("cagr"), fmtPct(metrics.cagr)],
+    [t("sharpe"), fmtNum(metrics.sharpe0)],
+    [t("maxDrawdown"), fmtPct(metrics.maxDrawdown)],
+    [t("volatility"), fmtPct(metrics.volatility)],
+  ];
+}
+
+function renderSharePreview() {
+  const preview = state.sharePreview;
+  if (!preview) {
+    els.shareOverlay.classList.remove("active");
+    els.shareOverlay.setAttribute("aria-hidden", "true");
+    return;
+  }
+  const portfolio = preview.portfolio;
+  els.shareSubtitle.textContent = portfolio.name || t("sharedPortfolio");
+  els.shareSummary.innerHTML = `
+    <div>
+      <span>${t("assets")}</span>
+      <strong>${escapeHtml(shareAssetText(portfolio))}</strong>
+    </div>
+    <div>
+      <span>${t("rebalance")}</span>
+      <strong>${escapeHtml(rebalanceLabel(portfolio.rebalance))}</strong>
+    </div>
+    <div>
+      <span>${t("date")}</span>
+      <strong>${escapeHtml(shareDateText(portfolio))}</strong>
+    </div>
+  `;
+  const metricRows = shareMetricRows(portfolio);
+  els.shareMetrics.innerHTML = metricRows.length
+    ? metricRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")
+    : `<div class="status">${t("noShareMetrics")}</div>`;
+  els.shareLinkInput.value = preview.url || "";
+  els.shareLinkInput.parentElement.style.display = preview.url ? "grid" : "none";
+  els.shareStatus.textContent = preview.status || "";
+  els.shareApplyBtn.disabled = state.loading;
+  els.shareOverlay.classList.add("active");
+  els.shareOverlay.setAttribute("aria-hidden", "false");
+}
+
+function showSharePreview(portfolio, options = {}) {
+  mergeCatalogItems(portfolio.catalog || []);
+  state.sharePreview = {
+    portfolio,
+    url: options.url || "",
+    status: options.status || "",
+  };
+  renderSharePreview();
+}
+
+function closeSharePreview() {
+  state.sharePreview = null;
+  renderSharePreview();
+}
+
+async function createShare(portfolio) {
+  const data = await api("/api/share", {
+    method: "POST",
+    body: JSON.stringify({ portfolio }),
+  });
+  return {
+    portfolio: data.portfolio || portfolio,
+    url: shareUrlForToken(data.token),
+  };
+}
+
+async function sharePortfolio(portfolio) {
+  try {
+    const created = await createShare(portfolio);
+    showSharePreview(created.portfolio, { url: created.url });
+  } catch (error) {
+    showSharePreview(portfolio, { status: error.message || t("createShareFailed") });
+  }
+}
+
+async function copyShareLink() {
+  const link = els.shareLinkInput.value;
+  if (!link) return;
+  try {
+    await navigator.clipboard.writeText(link);
+  } catch {
+    els.shareLinkInput.select();
+    document.execCommand("copy");
+  }
+  els.shareStatus.textContent = t("copied");
+}
+
+async function loadSharedPortfolioFromUrl() {
+  const token = shareTokenFromUrl();
+  if (!token) return;
+  try {
+    const data = await api(`/api/share?token=${encodeURIComponent(token)}`);
+    showSharePreview(data.portfolio, { url: window.location.href });
+  } catch (error) {
+    setStatus(error.message || t("loadShareFailed"), true);
+  }
+}
+
 async function api(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -883,13 +1070,15 @@ function renderFavorites() {
         <span>${escapeHtml(assetText)} · ${escapeHtml(rule)}</span>
       </div>
       <button class="ghost-btn" type="button">${t("apply")}</button>
+      <button class="icon-btn share-favorite-btn" type="button" title="${t("share")}">↗</button>
       <button class="icon-btn" type="button" title="${t("delete")}">×</button>
     `;
     for (const button of row.querySelectorAll("button")) {
       button.disabled = state.loading;
     }
     row.querySelector(".ghost-btn").addEventListener("click", () => applyFavorite(favorite.id));
-    row.querySelector(".icon-btn").addEventListener("click", () => deleteFavorite(favorite.id));
+    row.querySelector(".share-favorite-btn").addEventListener("click", () => sharePortfolio(favorite));
+    row.querySelector(".icon-btn:not(.share-favorite-btn)").addEventListener("click", () => deleteFavorite(favorite.id));
     els.favoriteList.appendChild(row);
   }
 }
@@ -912,17 +1101,22 @@ function applyFavorite(id) {
   if (state.loading) return;
   const favorite = state.favorites.find((item) => item.id === id);
   if (!favorite) return;
-  mergeCatalogItems(favorite.catalog);
-  state.assets = favorite.assets.map((asset) => ({
+  applyPortfolioSnapshot(favorite);
+}
+
+function applyPortfolioSnapshot(portfolio) {
+  if (state.loading || !portfolio) return;
+  mergeCatalogItems(portfolio.catalog || []);
+  state.assets = (portfolio.assets || []).map((asset) => ({
     id: asset.id,
     weight: Number(asset.weight || 0),
   }));
   state.rebalance = {
-    mode: favorite.rebalance?.mode || "none",
-    threshold: Number(favorite.rebalance?.threshold || 0.1),
+    mode: portfolio.rebalance?.mode || "none",
+    threshold: Number(portfolio.rebalance?.threshold || 0.1),
   };
-  els.startInput.value = favorite.start || "";
-  els.endInput.value = favorite.end || "";
+  els.startInput.value = portfolio.start || "";
+  els.endInput.value = portfolio.end || "";
   els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
   state.view = null;
   preserveScroll(() => {
@@ -930,6 +1124,7 @@ function applyFavorite(id) {
     renderModes();
     refreshSearchSelectionState();
   });
+  closeSharePreview();
   saveState();
   runBacktest(true);
 }
@@ -977,6 +1172,7 @@ function updateInteractionLocks() {
   const busy = state.loading;
   els.runBtn.disabled = busy;
   els.runBtn.textContent = busy ? t("running") : t("run");
+  els.shareCurrentBtn.disabled = busy;
   els.normalizeBtn.disabled = busy;
   els.startInput.disabled = busy;
   els.endInput.disabled = busy;
@@ -1000,6 +1196,9 @@ function updateInteractionLocks() {
   }
   for (const button of els.optimizerResults.querySelectorAll("button")) {
     button.disabled = busy || state.optimizing;
+  }
+  if (state.sharePreview) {
+    els.shareApplyBtn.disabled = busy;
   }
 }
 
@@ -1623,6 +1822,19 @@ function bindEvents() {
   });
   els.searchInput.addEventListener("input", () => scheduleSearch(els.searchInput.value));
   els.saveFavoriteBtn.addEventListener("click", saveFavorite);
+  els.shareCurrentBtn.addEventListener("click", () => {
+    if (state.loading) return;
+    sharePortfolio(currentShareSnapshot());
+  });
+  els.shareCloseBtn.addEventListener("click", closeSharePreview);
+  els.shareOverlay.addEventListener("click", (event) => {
+    if (event.target === els.shareOverlay) closeSharePreview();
+  });
+  els.shareCopyBtn.addEventListener("click", copyShareLink);
+  els.shareApplyBtn.addEventListener("click", () => {
+    if (!state.sharePreview) return;
+    applyPortfolioSnapshot(state.sharePreview.portfolio);
+  });
   els.favoriteNameInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") saveFavorite();
   });
@@ -1749,6 +1961,7 @@ async function bootstrapApp() {
     renderFavorites();
     await runBacktest(true);
     state.bootstrapped = true;
+    await loadSharedPortfolioFromUrl();
   } catch (error) {
     setStatus(error.message, true);
   }

@@ -122,6 +122,21 @@ body {
   display: flex;
 }
 
+.share-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: var(--overlay-bg);
+}
+
+.share-overlay.active {
+  display: flex;
+}
+
 .auth-panel {
   width: min(420px, 100%);
   padding: 18px;
@@ -129,6 +144,97 @@ body {
   border-radius: 8px;
   background: var(--panel);
   box-shadow: var(--modal-shadow);
+}
+
+.share-dialog {
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100vh - 32px));
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--modal-shadow);
+}
+
+.share-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.share-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.share-summary,
+.share-metrics {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.share-summary > div,
+.share-metrics > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--item-bg);
+}
+
+.share-summary span,
+.share-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.share-summary strong,
+.share-metrics strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.share-link-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 68px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.share-link-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.share-link-row input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--ink);
+}
+
+.share-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.share-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
 .auth-panel h2 {
@@ -408,7 +514,7 @@ h2 {
 
 .favorite-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 58px 32px;
+  grid-template-columns: minmax(0, 1fr) 58px 32px 32px;
   gap: 8px;
   align-items: center;
   padding: 9px;
@@ -918,7 +1024,7 @@ h2 {
   }
 
   .favorite-row {
-    grid-template-columns: minmax(0, 1fr) 52px 30px;
+    grid-template-columns: minmax(0, 1fr) 52px 30px 30px;
   }
 
   .asset-row {
@@ -937,6 +1043,12 @@ h2 {
   .field-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .share-link-row,
+  .share-summary > div,
+  .share-metrics > div {
+    grid-template-columns: 1fr;
   }
 
   .field-row input {

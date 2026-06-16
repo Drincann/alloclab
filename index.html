@@ -91,6 +91,7 @@
             <div id="rangeLabel" class="muted"></div>
           </div>
           <div class="interface-actions">
+            <button id="shareCurrentBtn" class="ghost-btn" type="button" data-i18n="share">分享</button>
             <div class="compact-toggle lang-toggle" id="languageModes" aria-label="Language">
               <button data-lang="zh" type="button" title="中文">中</button>
               <button data-lang="en" type="button" title="English">EN</button>
@@ -138,6 +139,28 @@
       window.PORTFOLIO_KEY_HELP_URL = __PORTFOLIO_KEY_HELP_URL__;
       window.ALLOCLAB_AUTH_REQUIRED = __ALLOCLAB_AUTH_REQUIRED__;
     </script>
+    <div id="shareOverlay" class="share-overlay" aria-hidden="true">
+      <section class="share-dialog" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+        <div class="share-head">
+          <div>
+            <h2 id="shareTitle" data-i18n="sharePreview">分享预览</h2>
+            <p id="shareSubtitle"></p>
+          </div>
+          <button id="shareCloseBtn" class="icon-btn" type="button" data-i18n-title="close" title="关闭">×</button>
+        </div>
+        <div id="shareSummary" class="share-summary"></div>
+        <div id="shareMetrics" class="share-metrics"></div>
+        <label class="share-link-row">
+          <span data-i18n="shareLink">分享链接</span>
+          <input id="shareLinkInput" type="text" readonly />
+          <button id="shareCopyBtn" class="ghost-btn" type="button" data-i18n="copy">复制</button>
+        </label>
+        <div id="shareStatus" class="share-status"></div>
+        <div class="share-actions">
+          <button id="shareApplyBtn" class="primary-btn" type="button" data-i18n="applyToView">应用到当前视图</button>
+        </div>
+      </section>
+    </div>
     <script src="/app.js?v=20260616-seed"></script>
   </body>
 </html>

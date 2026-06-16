@@ -3,6 +3,7 @@ import hmac
 import math
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -131,6 +132,7 @@ CATALOG = [
 
 CATALOG_BY_ID = {item["id"]: item for item in CATALOG}
 FUND_CATALOG_PATH = APP_DIR / "data" / "fund_catalog.json"
+SHARE_DIR = APP_DIR / "data" / "shares"
 SERIES_CACHE = {}
 SEARCH_CACHE = {}
 OPTIMIZE_CACHE = {}
@@ -1160,6 +1162,152 @@ def optimize_portfolio(asset_ids, start=None, end=None):
     return result
 
 
+class PortfolioShareStore:
+    def __init__(self, share_dir):
+        self.share_dir = share_dir
+
+    def create(self, portfolio):
+        self.share_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "version": 1,
+            "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "portfolio": portfolio,
+        }
+        for _ in range(10):
+            token = secrets.token_urlsafe(9)
+            path = self._path(token)
+            if path.exists():
+                continue
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(record, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            tmp_path.replace(path)
+            return token
+        raise RuntimeError("生成分享链接失败，请稍后重试")
+
+    def read(self, token):
+        path = self._path(token)
+        if not path.exists():
+            raise ValueError("分享链接不存在或已失效")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        portfolio = record.get("portfolio")
+        if not isinstance(portfolio, dict):
+            raise ValueError("分享内容无效")
+        return portfolio
+
+    def _path(self, token):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,32}", str(token or "")):
+            raise ValueError("分享链接无效")
+        return self.share_dir / f"{token}.json"
+
+
+SHARE_STORE = PortfolioShareStore(SHARE_DIR)
+
+
+def clean_share_text(value, fallback="", limit=120):
+    text = str(value or fallback).strip()
+    return text[:limit]
+
+
+def clean_share_date(value):
+    text = str(value or "").strip()
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else ""
+
+
+def clean_share_assets(raw_assets):
+    if not isinstance(raw_assets, list) or not raw_assets:
+        raise ValueError("分享组合至少需要一个标的")
+    assets = []
+    seen = set()
+    for raw in raw_assets[:20]:
+        asset_id = clean_share_text(raw.get("id"), limit=48)
+        if not asset_id or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        assets.append({"id": asset_id, "weight": float(raw.get("weight", 0))})
+    if not assets:
+        raise ValueError("分享组合至少需要一个有效标的")
+    return assets
+
+
+def clean_share_rebalance(raw_rebalance):
+    raw_rebalance = raw_rebalance if isinstance(raw_rebalance, dict) else {}
+    mode = raw_rebalance.get("mode") if raw_rebalance.get("mode") in {"none", "monthly", "quarterly", "annual", "threshold"} else "none"
+    threshold = float(raw_rebalance.get("threshold", 0.1) or 0.1)
+    return {"mode": mode, "threshold": max(0.01, min(0.5, threshold))}
+
+
+def clean_share_catalog(raw_catalog, assets):
+    wanted = {asset["id"] for asset in assets}
+    catalog = []
+    if not isinstance(raw_catalog, list):
+        return catalog
+    for item in raw_catalog[:50]:
+        asset_id = clean_share_text(item.get("id"), limit=48)
+        if asset_id not in wanted:
+            continue
+        catalog.append(
+            {
+                "id": asset_id,
+                "symbol": clean_share_text(item.get("symbol"), asset_id, 48),
+                "name": clean_share_text(item.get("name"), asset_id, 120),
+                "assetClass": clean_share_text(item.get("assetClass"), limit=48),
+                "currency": clean_share_text(item.get("currency"), limit=12),
+                "hintStart": clean_share_text(item.get("hintStart"), limit=16),
+                "lastDate": clean_share_text(item.get("lastDate"), limit=16),
+                "dataCount": int(item.get("dataCount") or 0),
+                "disabledReason": clean_share_text(item.get("disabledReason"), limit=40),
+                "exchange": clean_share_text(item.get("exchange"), limit=48),
+                "dynamic": bool(item.get("dynamic")),
+            }
+        )
+    return catalog
+
+
+def share_metrics_from_backtest(portfolio):
+    try:
+        result = backtest_portfolio(
+            [asset["id"] for asset in portfolio["assets"]],
+            [asset["weight"] for asset in portfolio["assets"]],
+            portfolio["rebalance"],
+            portfolio.get("start") or None,
+            portfolio.get("end") or None,
+        )
+        metrics = result["metrics"]
+        return {
+            "start": metrics.get("start", ""),
+            "end": metrics.get("end", ""),
+            "cagr": metrics.get("cagr"),
+            "totalReturn": metrics.get("totalReturn"),
+            "maxDrawdown": metrics.get("maxDrawdown"),
+            "volatility": metrics.get("volatility"),
+            "sharpe0": metrics.get("sharpe0"),
+            "calmar": metrics.get("calmar"),
+            "years": metrics.get("years"),
+        }, result.get("assets", [])
+    except Exception:
+        return None, []
+
+
+def clean_share_portfolio(raw_portfolio):
+    raw_portfolio = raw_portfolio if isinstance(raw_portfolio, dict) else {}
+    assets = clean_share_assets(raw_portfolio.get("assets"))
+    portfolio = {
+        "name": clean_share_text(raw_portfolio.get("name"), "Shared Portfolio"),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "assets": assets,
+        "rebalance": clean_share_rebalance(raw_portfolio.get("rebalance")),
+        "start": clean_share_date(raw_portfolio.get("start")),
+        "end": clean_share_date(raw_portfolio.get("end")),
+        "catalog": clean_share_catalog(raw_portfolio.get("catalog"), assets),
+    }
+    metrics, result_assets = share_metrics_from_backtest(portfolio)
+    if metrics:
+        portfolio["metrics"] = metrics
+    if result_assets:
+        portfolio["catalog"] = clean_share_catalog(result_assets, assets) or portfolio["catalog"]
+    return portfolio
+
+
 def json_response(handler, payload, status=200):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -1273,6 +1421,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/catalog":
                 json_response(self, {"items": [public_asset_meta(enrich_asset_market_profile(item)) for item in CATALOG]})
                 return
+            if parsed.path == "/api/share":
+                token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0].strip()
+                json_response(self, {"portfolio": SHARE_STORE.read(token)})
+                return
             super().do_GET()
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
@@ -1322,6 +1474,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                     payload.get("end") or None,
                 )
                 json_response(self, {"profiles": result})
+                return
+            if self.path == "/api/share":
+                portfolio = clean_share_portfolio(payload.get("portfolio") or payload)
+                token = SHARE_STORE.create(portfolio)
+                json_response(self, {"token": token, "portfolio": portfolio})
                 return
             json_response(self, {"error": "未知接口"}, 404)
         except ValueError as exc:
