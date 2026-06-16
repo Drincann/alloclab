@@ -192,8 +192,10 @@ const I18N = {
     ulcerIndex: "痛苦指数",
     years: "年数",
     rebalanceCount: "再平衡次数",
-    cagrHelp: "公式：(期末净值/期初净值)^(1/年数)-1。10% 表示若按同样复利速度增长，平均每年约赚 10%。",
-    totalReturnHelp: "公式：期末净值/期初净值-1。200% 表示本金变为 3 倍；它不考虑用了多少年。",
+    withdrawal4Short: "4%取现后",
+    depleted: "耗尽",
+    cagrHelp: "主值公式：(期末净值/期初净值)^(1/年数)-1。副值按 FIRE 4% 规则近似：第一年取初始本金 4%，之后每满一年按 2.5% 通胀上调同一笔取现金额；显示扣除这些取现后剩余资产的 CAGR，不是每年取当前资产的 4%。",
+    totalReturnHelp: "主值公式：期末净值/期初净值-1。副值按 FIRE 4% 规则近似：第一年取初始本金 4%，之后每满一年按 2.5% 通胀上调同一笔取现金额；展示扣除这些取现后剩余资产相对初始本金的总收益，不包含已取出的现金。",
     maxDrawdownHelp: "历史高点到后续低点的最大跌幅。-30% 表示某段时间里从峰值回撤到只剩 70%，之后可能才恢复。",
     volatilityHelp: "日收益率标准差乘以 √252。15% 大致表示一年内常见波动尺度约为正负 15%，不是最大亏损。",
     sharpeHelp: "公式：年化收益/年化波动，假设无风险利率为 0。1.0 表示每承受 1 单位波动，换来约 1 单位年化收益。",
@@ -207,6 +209,7 @@ const I18N = {
     annualShort: "年化",
     drawdownShort: "回撤",
     sharpeShort: "夏普",
+    averageNavShort: "平均净值",
     enterAccessKey: "请输入访问密钥",
     authInvalid: "访问密钥无效或尝试次数过多",
     requestFailed: "请求失败",
@@ -226,6 +229,7 @@ const I18N = {
     profileSharpe: "风险调整后最佳",
     profileCalmar: "回撤效率最佳",
     profileReturn: "年化收益最高",
+    profileAverageNav: "平均净值最高",
     profileMdd20: "最大回撤不超过 20% 的最高年化",
     profileMdd30: "最大回撤不超过 30% 的最高年化",
     profileMdd40: "最大回撤不超过 40% 的最高年化",
@@ -335,8 +339,10 @@ const I18N = {
     ulcerIndex: "Ulcer index",
     years: "Years",
     rebalanceCount: "Rebalances",
-    cagrHelp: "Formula: (ending NAV / starting NAV)^(1 / years) - 1. A 10% CAGR means the portfolio compounded at roughly 10% per year.",
-    totalReturnHelp: "Formula: ending NAV / starting NAV - 1. A 200% total return means capital became 3x; it ignores how many years it took.",
+    withdrawal4Short: "After 4% withdrawal",
+    depleted: "Depleted",
+    cagrHelp: "Main value: (ending NAV / starting NAV)^(1 / years) - 1. Secondary value approximates the FIRE 4% rule: withdraw 4% of initial capital in year 1, then raise that same cash amount by 2.5% inflation after each full year. It shows CAGR of remaining capital after withdrawals, not 4% of current assets every year.",
+    totalReturnHelp: "Main value: ending NAV / starting NAV - 1. Secondary value approximates the FIRE 4% rule: withdraw 4% of initial capital in year 1, then raise that same cash amount by 2.5% inflation after each full year. It shows remaining capital return versus initial capital, excluding cash already withdrawn.",
     maxDrawdownHelp: "Largest peak-to-trough decline. A -30% drawdown means the portfolio fell from a high to 70% of that high before recovering.",
     volatilityHelp: "Daily return standard deviation multiplied by sqrt(252). A 15% value is a typical annual fluctuation scale, not a max loss.",
     sharpeHelp: "Formula: CAGR / annualized volatility, using a 0% risk-free rate. A 1.0 value means roughly 1 unit of return per 1 unit of volatility.",
@@ -350,6 +356,7 @@ const I18N = {
     annualShort: "CAGR",
     drawdownShort: "MDD",
     sharpeShort: "Sharpe",
+    averageNavShort: "Avg NAV",
     enterAccessKey: "Enter the access key",
     authInvalid: "Invalid access key or too many attempts",
     requestFailed: "Request failed",
@@ -369,6 +376,7 @@ const I18N = {
     profileSharpe: "Best risk-adjusted",
     profileCalmar: "Best drawdown efficiency",
     profileReturn: "Highest CAGR",
+    profileAverageNav: "Highest avg NAV",
     profileMdd20: "Highest CAGR with max drawdown <= 20%",
     profileMdd30: "Highest CAGR with max drawdown <= 30%",
     profileMdd40: "Highest CAGR with max drawdown <= 40%",
@@ -597,6 +605,11 @@ function fmtNum(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function fmtMultiple(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(value)) return t("none");
+  return `${Number(value).toFixed(digits)}x`;
+}
+
 function assetClassLabel(value) {
   const labels = {
     "US Equity": t("assetClassUSEquity"),
@@ -632,6 +645,7 @@ function profileTitle(profile) {
     sharpe: "profileSharpe",
     calmar: "profileCalmar",
     return: "profileReturn",
+    averageNav: "profileAverageNav",
     mdd20: "profileMdd20",
     mdd30: "profileMdd30",
     mdd40: "profileMdd40",
@@ -783,6 +797,7 @@ function currentMetricSnapshot() {
     volatility: m.volatility,
     sharpe0: m.sharpe0,
     calmar: m.calmar,
+    averageNav: m.averageNav,
     years: m.years,
   };
 }
@@ -1009,6 +1024,7 @@ function backtestMetricsFromResult(result) {
     volatility: m.volatility,
     sharpe0: m.sharpe0,
     calmar: m.calmar,
+    averageNav: m.averageNav,
     years: m.years,
   };
 }
@@ -1642,9 +1658,17 @@ function renderAll() {
 
 function renderMetrics() {
   const m = state.result.metrics;
+  const withdrawal4 = m.withdrawal4 || {};
+  const withdrawalDepleted = Boolean(withdrawal4.depleted);
+  const withdrawal4CagrText = withdrawalDepleted ? t("depleted") : fmtPct(withdrawal4.cagr);
+  const withdrawal4ReturnText = withdrawalDepleted
+    ? (withdrawal4.depletedDate || t("depleted"))
+    : fmtPct((withdrawal4.terminal ?? 1) - 1);
+  const withdrawal4CagrClass = withdrawalDepleted || (withdrawal4.cagr ?? 0) < 0 ? "negative" : "positive";
+  const withdrawal4ReturnClass = withdrawalDepleted || ((withdrawal4.terminal ?? 1) - 1) < 0 ? "negative" : "positive";
   const cards = [
-    [t("cagr"), fmtPct(m.cagr), m.cagr >= 0 ? "positive" : "negative", t("cagrHelp")],
-    [t("totalReturn"), fmtPct(m.totalReturn), m.totalReturn >= 0 ? "positive" : "negative", t("totalReturnHelp")],
+    [t("cagr"), fmtPct(m.cagr), m.cagr >= 0 ? "positive" : "negative", t("cagrHelp"), withdrawal4CagrText, withdrawal4CagrClass],
+    [t("totalReturn"), fmtPct(m.totalReturn), m.totalReturn >= 0 ? "positive" : "negative", t("totalReturnHelp"), withdrawal4ReturnText, withdrawal4ReturnClass],
     [t("maxDrawdown"), fmtPct(m.maxDrawdown), "negative", t("maxDrawdownHelp")],
     [t("volatility"), fmtPct(m.volatility), "", t("volatilityHelp")],
     [t("sharpe"), fmtNum(m.sharpe0), "", t("sharpeHelp")],
@@ -1658,13 +1682,14 @@ function renderMetrics() {
   ];
   els.metricsGrid.innerHTML = cards
     .map(
-      ([label, value, klass, help]) => `
+      ([label, value, klass, help, withdrawalValue, withdrawalKlass]) => `
         <div class="metric-card ${klass}">
           <div class="metric-label">
             <span>${escapeHtml(label)}</span>
             <span class="metric-help" tabindex="0" role="note" aria-label="${escapeHtml(help)}" data-tooltip="${escapeHtml(help)}">?</span>
           </div>
           <strong>${value}</strong>
+          ${withdrawalValue ? `<div class="metric-sub"><span>${escapeHtml(t("withdrawal4Short"))}</span><b class="${escapeHtml(withdrawalKlass)}">${escapeHtml(withdrawalValue)}</b></div>` : ""}
         </div>
       `,
     )
@@ -2140,6 +2165,7 @@ function renderOptimizer(profiles) {
         <span>${t("annualShort")} ${fmtPct(m.cagr)}</span>
         <span>${t("drawdownShort")} ${fmtPct(m.maxDrawdown)}</span>
         <span>${t("sharpeShort")} ${fmtNum(m.sharpe0)}</span>
+        <span>${t("averageNavShort")} ${fmtMultiple(m.averageNav)}</span>
       </div>
       <button type="button">${t("apply")}</button>
     `;

@@ -1195,6 +1195,61 @@ def years_between(start, end):
     return (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days / 365.25
 
 
+def add_years(value, years):
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        return value.replace(year=value.year + years, month=2, day=28)
+
+
+def fire_withdrawal_metrics(dates, nav, annual_rate=0.04, inflation_rate=0.025):
+    if len(dates) < 2:
+        return {
+            "rate": annual_rate,
+            "inflationRate": inflation_rate,
+            "terminal": 1,
+            "cagr": 0,
+            "depleted": False,
+            "depletedDate": "",
+            "withdrawals": 0,
+            "totalWithdrawn": 0,
+        }
+    value = 1.0
+    withdrawals = 0
+    total_withdrawn = 0
+    withdrawal_amount = annual_rate
+    depleted_date = ""
+    start_date = datetime.fromisoformat(dates[0])
+    next_withdrawal_date = add_years(start_date, 1)
+    for i in range(1, len(dates)):
+        value *= nav[i] / nav[i - 1]
+        current_date = datetime.fromisoformat(dates[i])
+        while current_date >= next_withdrawal_date:
+            value -= withdrawal_amount
+            withdrawals += 1
+            total_withdrawn += withdrawal_amount
+            if value <= 0:
+                depleted_date = dates[i]
+                value = 0
+                break
+            withdrawal_amount *= 1 + inflation_rate
+            next_withdrawal_date = add_years(start_date, withdrawals + 1)
+        if depleted_date:
+            break
+    years = years_between(dates[0], depleted_date or dates[-1])
+    cagr = value ** (1 / years) - 1 if value > 0 and years > 0 else None
+    return {
+        "rate": annual_rate,
+        "inflationRate": inflation_rate,
+        "terminal": value,
+        "cagr": cagr,
+        "depleted": bool(depleted_date),
+        "depletedDate": depleted_date,
+        "withdrawals": withdrawals,
+        "totalWithdrawn": total_withdrawn,
+    }
+
+
 def should_rebalance(mode, threshold, dates, t, target_weights, units, prices, value):
     if t == len(dates) - 1 or mode == "none":
         return False
@@ -1228,7 +1283,9 @@ def compute_metrics(dates, nav, rebalances):
     best = max(returns) if returns else 0
     worst = min(returns) if returns else 0
     avg_day = sum(returns) / len(returns) if returns else 0
+    average_nav = sum(nav) / len(nav)
     ulcer = math.sqrt(sum(dd * dd for dd in drawdowns) / len(drawdowns))
+    withdrawal4 = fire_withdrawal_metrics(dates, nav, 0.04, 0.025)
     return {
         "start": dates[0],
         "end": dates[-1],
@@ -1242,11 +1299,13 @@ def compute_metrics(dates, nav, rebalances):
         "bestDay": best,
         "worstDay": worst,
         "avgDay": avg_day,
+        "averageNav": average_nav,
         "winRate": positive_days / len(returns) if returns else 0,
         "ulcerIndex": ulcer,
         "rebalanceCount": len(rebalances),
         "drawdownPeak": dates[peak_idx],
         "drawdownTrough": dates[trough_idx],
+        "withdrawal4": withdrawal4,
     }, drawdowns
 
 
@@ -1398,6 +1457,7 @@ def optimize_portfolio(asset_ids, start=None, end=None):
                         "cagr": metrics["cagr"],
                         "mdd": metrics["maxDrawdown"],
                         "vol": metrics["volatility"],
+                        "averageNav": metrics["averageNav"],
                     },
                 }
             )
@@ -1430,6 +1490,11 @@ def optimize_portfolio(asset_ids, start=None, end=None):
         "return",
         "年化收益最高",
         sorted(candidates, key=lambda c: c["score"]["cagr"], reverse=True),
+    )
+    add_profile(
+        "averageNav",
+        "平均净值最高",
+        sorted(candidates, key=lambda c: (c["score"]["averageNav"], c["score"]["cagr"]), reverse=True),
     )
     for limit in [0.20, 0.30, 0.40]:
         filtered = [c for c in candidates if c["score"]["mdd"] >= -limit]
@@ -1590,6 +1655,7 @@ def share_profile_from_backtest(portfolio):
             "volatility": metrics.get("volatility"),
             "sharpe0": metrics.get("sharpe0"),
             "calmar": metrics.get("calmar"),
+            "averageNav": metrics.get("averageNav"),
             "years": metrics.get("years"),
         }, result.get("assets", []), sampled_share_curve(result.get("dates", []), result.get("nav", []))
     except Exception:
