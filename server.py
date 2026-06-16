@@ -170,6 +170,19 @@ AUTH_LOCKS = {}
 AUTH_ERROR = {"error": "访问密钥无效或尝试次数过多"}
 
 
+class MarketDataUnavailable(RuntimeError):
+    def __init__(self, asset_id, status="", detail=""):
+        self.asset_id = asset_id
+        self.status = str(status or "")
+        self.detail = detail
+        message = (
+            f"{asset_id} 行情源在当前服务器环境不可用。Yahoo 返回"
+            f"{' HTTP ' + self.status if self.status else '错误'}，备用源不可用或数据不完整。"
+            "请稍后重试，或为服务器配置稳定行情源/代理。"
+        )
+        super().__init__(message)
+
+
 def log_event(event, **fields):
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     detail = " ".join(f"{key}={value}" for key, value in fields.items())
@@ -323,7 +336,7 @@ def fetch_yahoo(symbol):
                 sina_error=type(sina_exc).__name__,
                 sina_status=http_error_status(sina_exc),
             )
-        raise yahoo_exc
+        raise MarketDataUnavailable(symbol, http_error_status(yahoo_exc), type(yahoo_exc).__name__) from yahoo_exc
 
 
 def series_quality_warnings(rows, expected_start=""):
@@ -1030,7 +1043,7 @@ def _yahoo_series_with_backfill(meta, symbol):
             if fallback_rows:
                 log_event(f"market.yahoo_fallback.{source}", symbol=meta["id"], count=len(fallback_rows))
                 return fallback_rows
-        raise yahoo_exc
+        raise MarketDataUnavailable(meta["id"], http_error_status(yahoo_exc), type(yahoo_exc).__name__) from yahoo_exc
 
     if not hint_start:
         return rows
@@ -1725,6 +1738,17 @@ class AppHandler(SimpleHTTPRequestHandler):
             super().do_GET()
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
+        except MarketDataUnavailable as exc:
+            json_response(
+                self,
+                {
+                    "error": str(exc),
+                    "kind": "market_data_unavailable",
+                    "asset": exc.asset_id,
+                    "sourceStatus": exc.status,
+                },
+                502,
+            )
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
@@ -1780,6 +1804,17 @@ class AppHandler(SimpleHTTPRequestHandler):
             json_response(self, {"error": "未知接口"}, 404)
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
+        except MarketDataUnavailable as exc:
+            json_response(
+                self,
+                {
+                    "error": str(exc),
+                    "kind": "market_data_unavailable",
+                    "asset": exc.asset_id,
+                    "sourceStatus": exc.status,
+                },
+                502,
+            )
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 

@@ -18,6 +18,7 @@ const state = {
   extraCatalog: [],
   chartScale: "linear",
   visibleSeries: { portfolio: true, assets: {} },
+  backtestError: null,
   bootstrapped: false,
   language: "zh",
   theme: "light",
@@ -139,6 +140,10 @@ const I18N = {
     scan: "扫描",
     scanning: "扫描中",
     equityCurve: "净值曲线",
+    chartUnavailableTitle: "行情数据不可用",
+    marketDataIssueTitle: "服务端行情源不可用",
+    marketDataIssueBody: "当前服务器访问 Yahoo/备用行情源受限，或备用数据存在明显断档。为避免误导，已停止本次回测并清空旧图。",
+    marketDataIssueHint: "这通常是部署环境的出站网络或数据源限制，不是访问密钥问题。请稍后重试，或配置稳定行情源/代理。",
     languageGroup: "语言",
     themeGroup: "主题",
     scaleGroup: "坐标",
@@ -266,6 +271,10 @@ const I18N = {
     scan: "Scan",
     scanning: "Scanning",
     equityCurve: "Equity Curve",
+    chartUnavailableTitle: "Market Data Unavailable",
+    marketDataIssueTitle: "Server market data source unavailable",
+    marketDataIssueBody: "This server cannot reach Yahoo or usable fallback data. Fallback data may be incomplete, so this backtest was stopped and the old chart was cleared.",
+    marketDataIssueHint: "This is usually an outbound network or data-source limit in the deployment environment, not an access-key problem. Try later or configure a stable market data source/proxy.",
     languageGroup: "Language",
     themeGroup: "Theme",
     scaleGroup: "Scale",
@@ -350,6 +359,9 @@ function t(key) {
 function normalizeErrorMessage(message) {
   if (!message) return t("authInvalid");
   if (message === I18N.zh.authInvalid || message === I18N.en.authInvalid) return t("authInvalid");
+  if (/HTTP Error (403|429)|Too Many Requests|Forbidden/i.test(message)) {
+    return t("marketDataIssueTitle");
+  }
   return message;
 }
 
@@ -1081,6 +1093,10 @@ async function api(path, options = {}) {
   if (!response.ok || data.error) {
     const error = new Error(normalizeErrorMessage(data.error || `${t("requestFailed")}: ${response.status}`));
     error.status = response.status;
+    error.kind = data.kind || "";
+    error.asset = data.asset || "";
+    error.sourceStatus = data.sourceStatus || "";
+    error.rawMessage = data.error || "";
     throw error;
   }
   return data;
@@ -1405,6 +1421,80 @@ function setStatus(text, isError = false) {
   }
 }
 
+function clearChartLegend() {
+  const legend = document.getElementById("chartLegend");
+  if (legend) legend.remove();
+}
+
+function wrapCanvasText(ctx, text, maxWidth) {
+  const words = String(text || "").split(/\s+/);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width <= maxWidth || !line) {
+      line = next;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawChartMessage(title, lines = [], isError = false) {
+  const { canvas, dpr, width, height } = canvasGeometry();
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const cssWidth = width / dpr;
+  const cssHeight = height / dpr;
+  ctx.fillStyle = cssVar("--canvas-bg");
+  ctx.fillRect(0, 0, cssWidth, cssHeight);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = isError ? cssVar("--danger") : cssVar("--ink");
+  ctx.font = "700 18px system-ui";
+  ctx.fillText(title, cssWidth / 2, cssHeight / 2 - 42);
+  ctx.fillStyle = cssVar("--muted");
+  ctx.font = "13px system-ui";
+  const wrapped = lines.flatMap((line) => wrapCanvasText(ctx, line, Math.min(620, cssWidth - 48)));
+  wrapped.slice(0, 5).forEach((line, index) => {
+    ctx.fillText(line, cssWidth / 2, cssHeight / 2 - 8 + index * 22);
+  });
+  ctx.restore();
+}
+
+function renderBacktestError(error) {
+  const isMarketDataIssue = error?.kind === "market_data_unavailable";
+  const title = isMarketDataIssue ? t("marketDataIssueTitle") : t("chartUnavailableTitle");
+  const detail = isMarketDataIssue ? t("marketDataIssueBody") : error.message;
+  const hint = isMarketDataIssue ? t("marketDataIssueHint") : "";
+  const assetText = error?.asset ? `${error.asset}${error.sourceStatus ? ` · HTTP ${error.sourceStatus}` : ""}` : "";
+  state.result = null;
+  state.view = null;
+  state.hoverIndex = null;
+  state.selection = null;
+  state.backtestError = { title, detail, hint, assetText, isMarketDataIssue };
+  els.chartTitle.textContent = title;
+  els.rangeLabel.textContent = assetText || "";
+  els.tooltip.style.display = "none";
+  clearChartLegend();
+  drawChartMessage(title, [detail, hint].filter(Boolean), true);
+  els.metricsGrid.innerHTML = `
+    <div class="status error backtest-error">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(detail)}</span>
+      ${assetText ? `<em>${escapeHtml(assetText)}</em>` : ""}
+      ${hint ? `<small>${escapeHtml(hint)}</small>` : ""}
+    </div>
+  `;
+  els.corrMatrix.innerHTML = `<div class="status">${escapeHtml(t("noResults"))}</div>`;
+  els.rebalanceTable.innerHTML = `<div class="status">${escapeHtml(t("noRecords"))}</div>`;
+}
+
 function updateInteractionLocks() {
   const busy = state.loading;
   els.runBtn.disabled = busy || state.assets.length < 1;
@@ -1472,6 +1562,7 @@ async function runBacktest(resetView = true) {
         body: JSON.stringify(requestPayload()),
       });
       state.result = result;
+      state.backtestError = null;
       state.backtestDirty = false;
       syncVisibleSeries(result);
       mergeCatalogItems(result.assets);
@@ -1484,14 +1575,14 @@ async function runBacktest(resetView = true) {
       renderAll();
       restoreScrollState(scrollSnapshot);
     } catch (error) {
-      els.metricsGrid.innerHTML = `<div class="status error">${error.message}</div>`;
-      restoreScrollState(scrollSnapshot);
       if (error.status === 401) {
         state.loading = false;
         state.pendingBacktestResetView = null;
         updateInteractionLocks();
         throw error;
       }
+      renderBacktestError(error);
+      restoreScrollState(scrollSnapshot);
     }
     if (state.pendingBacktestResetView === null) {
       break;
@@ -1505,6 +1596,19 @@ async function runBacktest(resetView = true) {
 }
 
 function renderAll() {
+  if (!state.result) {
+    if (state.backtestError) {
+      drawChartMessage(
+        state.backtestError.title,
+        [state.backtestError.detail, state.backtestError.hint].filter(Boolean),
+        true,
+      );
+    } else {
+      drawChartMessage(t("equityCurve"), [], false);
+    }
+    clearChartLegend();
+    return;
+  }
   renderMetrics();
   renderCorrelation();
   renderRebalanceTable();

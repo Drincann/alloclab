@@ -1095,6 +1095,32 @@ h2 {
   color: var(--danger);
 }
 
+.backtest-error {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 36%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 7%, var(--panel));
+}
+
+.backtest-error strong {
+  font-size: 14px;
+}
+
+.backtest-error span,
+.backtest-error small,
+.backtest-error em {
+  color: var(--muted);
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.backtest-error small {
+  font-size: 12px;
+}
+
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 1fr;
