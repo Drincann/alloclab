@@ -2198,12 +2198,16 @@ async function bootstrapApp() {
   renderModes();
   renderScaleMode();
   try {
+    const hasShareToken = Boolean(shareTokenFromUrl());
     await loadCatalog();
     renderAssets();
     renderFavorites();
-    await runBacktest(true);
     state.bootstrapped = true;
-    await loadSharedPortfolioFromUrl();
+    if (hasShareToken) {
+      await loadSharedPortfolioFromUrl();
+    } else {
+      await runBacktest(true);
+    }
   } catch (error) {
     setStatus(error.message, true);
   }
