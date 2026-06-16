@@ -67,7 +67,7 @@ let debounceTimer = null;
 let searchDebounceTimer = null;
 let searchRequestSeq = 0;
 let searchAbortController = null;
-let fundStartHintRequestSeq = 0;
+let assetStartHintRequestSeq = 0;
 let fundCatalogRefreshSeq = 0;
 let searchCatalogNotice = "";
 let searchCatalogNoticeTimer = null;
@@ -128,6 +128,7 @@ const I18N = {
     startLoading: "加载中",
     fundCatalogUpdating: "基金目录更新中",
     fundCatalogUpdated: "基金目录已更新",
+    insufficientData: "数据不足",
     added: "已添加",
     add: "添加",
     remove: "移除",
@@ -237,6 +238,7 @@ const I18N = {
     startLoading: "Loading",
     fundCatalogUpdating: "Updating fund catalog",
     fundCatalogUpdated: "Fund catalog updated",
+    insufficientData: "Insufficient data",
     added: "Added",
     add: "Add",
     remove: "Remove",
@@ -575,6 +577,7 @@ function snapshotCatalogForAssets(assets) {
       currency: meta.currency || "",
       hintStart: meta.hintStart || "",
       lastDate: meta.lastDate || "",
+      dataCount: Number(meta.dataCount || 0),
       exchange: meta.exchange || "",
       dynamic: Boolean(meta.dynamic),
     }));
@@ -700,15 +703,27 @@ function scheduleSearch(query) {
   searchDebounceTimer = setTimeout(() => renderSearch(query), 450);
 }
 
-function isFundStartHintLoading(item) {
-  return item?.hintStart === FUND_START_LOADING_HINT;
+function isAssetStartHintLoading(item) {
+  return item?.dynamic && (!item.hintStart || item.hintStart === FUND_START_LOADING_HINT);
 }
 
-function fundStartHintMarkup(item) {
-  if (isFundStartHintLoading(item)) {
+function hasInsufficientBacktestData(item) {
+  return Number(item?.dataCount || 0) > 0 && Number(item.dataCount) < 30;
+}
+
+function assetStartHintMarkup(item) {
+  if (isAssetStartHintLoading(item)) {
     return `<span class="inline-loading"><span class="inline-spinner" aria-hidden="true"></span>${escapeHtml(t("startLoading"))}</span>`;
   }
-  return escapeHtml(item.hintStart || t("unknown"));
+  const start = escapeHtml(item.hintStart || t("unknown"));
+  if (hasInsufficientBacktestData(item)) {
+    return `${start} · ${escapeHtml(t("insufficientData"))}`;
+  }
+  return start;
+}
+
+function canAddSearchItem(item, selected) {
+  return !state.loading && !selected.has(item.id) && !isAssetStartHintLoading(item) && !hasInsufficientBacktestData(item);
 }
 
 function renderSearchCatalogNotice() {
@@ -742,13 +757,14 @@ function renderSearchItems(items, options = {}) {
     button.type = "button";
     button.className = "search-result";
     button.dataset.assetId = item.id;
-    button.disabled = state.loading || selected.has(item.id);
+    button.dataset.unavailable = hasInsufficientBacktestData(item) || isAssetStartHintLoading(item) ? "true" : "";
+    button.disabled = !canAddSearchItem(item, selected);
     button.innerHTML = `
       <div>
         <strong>${escapeHtml(item.id)} · ${escapeHtml(item.name)}</strong>
-        <div class="meta">${escapeHtml(assetClassLabel(item.assetClass))} · ${escapeHtml(item.currency || "")} · ${t("startSince")} ${fundStartHintMarkup(item)}</div>
+        <div class="meta">${escapeHtml(assetClassLabel(item.assetClass))} · ${escapeHtml(item.currency || "")} · ${t("startSince")} ${assetStartHintMarkup(item)}</div>
       </div>
-      <span>${selected.has(item.id) ? t("added") : t("add")}</span>
+      <span>${selected.has(item.id) ? t("added") : hasInsufficientBacktestData(item) ? t("insufficientData") : t("add")}</span>
     `;
     button.addEventListener("click", () => addAsset(item.id));
     els.searchResults.appendChild(button);
@@ -759,23 +775,27 @@ function renderSearchItems(items, options = {}) {
   renderSearchCatalogNotice();
 }
 
-async function refreshSearchFundStartHints(items, requestSeq) {
+async function refreshSearchAssetStartHints(items, requestSeq) {
   const assetIds = items
-    .filter((item) => item.id && isFundStartHintLoading(item))
+    .filter((item) => item.id && isAssetStartHintLoading(item))
     .map((item) => item.id);
   if (!assetIds.length) return;
-  const hintRequestSeq = ++fundStartHintRequestSeq;
+  const hintRequestSeq = ++assetStartHintRequestSeq;
   try {
-    const data = await api("/api/fund-start-hints", {
+    const data = await api("/api/asset-start-hints", {
       method: "POST",
       body: JSON.stringify({ assetIds }),
     });
-    if (requestSeq !== searchRequestSeq || hintRequestSeq !== fundStartHintRequestSeq) return;
-    const hints = new Map((data.items || []).map((item) => [item.id, item.hintStart || FUND_START_UNAVAILABLE_HINT]));
+    if (requestSeq !== searchRequestSeq || hintRequestSeq !== assetStartHintRequestSeq) return;
+    const hints = new Map((data.items || []).map((item) => [item.id, item]));
     const updatedItems = [];
     for (const item of items) {
       if (!hints.has(item.id)) continue;
-      item.hintStart = hints.get(item.id);
+      const hint = hints.get(item.id);
+      item.hintStart = hint.hintStart;
+      item.lastDate = hint.lastDate || item.lastDate || "";
+      item.dataCount = Number(hint.dataCount || item.dataCount || 0);
+      item.hintStart = item.hintStart || FUND_START_UNAVAILABLE_HINT;
       updatedItems.push(item);
     }
     if (!updatedItems.length) return;
@@ -787,7 +807,7 @@ async function refreshSearchFundStartHints(items, requestSeq) {
     renderAssets();
     saveState();
   } catch (error) {
-    if (requestSeq !== searchRequestSeq || hintRequestSeq !== fundStartHintRequestSeq) return;
+    if (requestSeq !== searchRequestSeq || hintRequestSeq !== assetStartHintRequestSeq) return;
     const failedIds = new Set(assetIds);
     for (const item of items) {
       if (failedIds.has(item.id)) {
@@ -873,22 +893,25 @@ async function renderSearch(query, options = {}) {
   }
   if (requestSeq !== searchRequestSeq) return;
   renderSearchItems(items, { preserveScroll: options.preserveScroll, previousScrollTop });
-  refreshSearchFundStartHints(items, requestSeq);
+  refreshSearchAssetStartHints(items, requestSeq);
 }
 
 function refreshSearchSelectionState() {
   const selected = new Set(state.assets.map((asset) => asset.id));
   for (const button of els.searchResults.querySelectorAll(".search-result")) {
     const isSelected = selected.has(button.dataset.assetId);
-    button.disabled = state.loading || isSelected;
+    const unavailable = button.dataset.unavailable === "true";
+    button.disabled = state.loading || isSelected || unavailable;
     const label = button.querySelector("span");
-    if (label) label.textContent = isSelected ? t("added") : t("add");
+    if (label) label.textContent = isSelected ? t("added") : unavailable ? t("insufficientData") : t("add");
   }
 }
 
 function addAsset(id) {
   if (state.loading) return;
   if (state.assets.some((asset) => asset.id === id)) return;
+  const meta = assetMeta(id);
+  if (isAssetStartHintLoading(meta) || hasInsufficientBacktestData(meta)) return;
   state.assets.push({ id, weight: Math.round(100 / (state.assets.length + 1)) });
   preserveScroll(() => {
     renderAssets();

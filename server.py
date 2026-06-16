@@ -493,6 +493,50 @@ def fund_start_hints(asset_ids):
     return hints
 
 
+def asset_start_hint(asset_id):
+    asset_id = str(asset_id or "").strip()
+    if not asset_id:
+        return None
+    if asset_id in CATALOG_BY_ID:
+        meta = CATALOG_BY_ID[asset_id]
+        hint_start = meta.get("hintStart") or enrich_start(meta).get("hintStart")
+        return {**meta, "hintStart": hint_start or "不可用"}
+    if asset_id.startswith("F:"):
+        hint_start = fetch_fund_start_date(asset_id[2:])
+        meta = get_dynamic_fund_meta(asset_id) or {"id": asset_id}
+        return {**meta, "hintStart": hint_start or "不可用"}
+    if asset_id.startswith("Y:"):
+        meta = get_dynamic_yahoo_meta(asset_id)
+        return enrich_start(meta) if meta else None
+    return None
+
+
+def asset_start_hints(asset_ids):
+    hints = []
+    normalized_ids = []
+    seen = set()
+    for asset_id in asset_ids:
+        asset_id = str(asset_id or "").strip()
+        if not asset_id or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        if asset_id in CATALOG_BY_ID or asset_id.startswith(("F:", "Y:")):
+            normalized_ids.append(asset_id)
+    if not normalized_ids:
+        return hints
+    with ThreadPoolExecutor(max_workers=min(6, len(normalized_ids))) as executor:
+        futures = {executor.submit(asset_start_hint, asset_id): asset_id for asset_id in normalized_ids}
+        for future in as_completed(futures):
+            asset_id = futures[future]
+            try:
+                hint = future.result()
+            except Exception:
+                hint = {"id": asset_id, "hintStart": "不可用"}
+            if hint:
+                hints.append(hint)
+    return hints
+
+
 def fund_search(query, limit=12):
     key = query.lower().strip()
     if not key:
@@ -598,9 +642,11 @@ def enrich_start(meta):
         meta = dict(meta)
         meta["hintStart"] = rows[0]["date"] if rows else ""
         meta["lastDate"] = rows[-1]["date"] if rows else ""
+        meta["dataCount"] = len(rows)
     except Exception:
         meta = dict(meta)
         meta["hintStart"] = "不可用"
+        meta["dataCount"] = 0
     return meta
 
 
@@ -1204,6 +1250,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 json_response(self, fund_catalog_status())
                 return
             super().do_GET()
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
@@ -1248,6 +1296,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                     return
                 json_response(self, {"items": fund_start_hints(asset_ids)})
                 return
+            if self.path == "/api/asset-start-hints":
+                asset_ids = payload.get("assetIds", [])
+                if not isinstance(asset_ids, list):
+                    json_response(self, {"error": "assetIds 必须是数组"}, 400)
+                    return
+                json_response(self, {"items": asset_start_hints(asset_ids)})
+                return
             if self.path == "/api/optimize":
                 assets = payload.get("assets", [])
                 asset_ids = [item["id"] for item in assets]
@@ -1259,6 +1314,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 json_response(self, {"profiles": result})
                 return
             json_response(self, {"error": "未知接口"}, 404)
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
