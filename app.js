@@ -11,6 +11,7 @@ const state = {
   hoverIndex: null,
   loading: false,
   pendingBacktestResetView: null,
+  backtestDirty: false,
   optimizing: false,
   optimizerProfiles: [],
   favorites: [],
@@ -96,6 +97,7 @@ const I18N = {
     verifying: "验证中",
     getKey: "获取密钥",
     run: "运行",
+    runPending: "运行更新",
     running: "运行中",
     backtesting: "回测中",
     searchPlaceholder: "搜索代码 / 指数 / ETF / 基金",
@@ -222,6 +224,7 @@ const I18N = {
     verifying: "Verifying",
     getKey: "Get key",
     run: "Run",
+    runPending: "Run update",
     running: "Running",
     backtesting: "Backtesting",
     searchPlaceholder: "Search ticker / index / ETF / fund",
@@ -1085,7 +1088,12 @@ async function api(path, options = {}) {
 
 function scheduleRun() {
   clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(runBacktest, 350);
+  markBacktestDirty();
+}
+
+function markBacktestDirty() {
+  state.backtestDirty = true;
+  updateInteractionLocks();
 }
 
 function scheduleSearch(query) {
@@ -1223,7 +1231,7 @@ function addAsset(id) {
 
 function removeAsset(id) {
   if (state.loading) return;
-  if (state.assets.length <= 1) return;
+  if (state.assets.length < 1) return;
   state.assets = state.assets.filter((asset) => asset.id !== id);
   preserveScroll(() => {
     renderAssets();
@@ -1234,6 +1242,10 @@ function removeAsset(id) {
 }
 
 function normalizeWeights() {
+  if (state.assets.length < 1) {
+    return;
+  }
+
   const total = state.assets.reduce((sum, asset) => sum + Number(asset.weight || 0), 0);
   if (total <= 0) {
     const equal = 100 / state.assets.length;
@@ -1346,7 +1358,7 @@ function applyPortfolioSnapshot(portfolio) {
   });
   closeShareDialog();
   saveState();
-  runBacktest(true);
+  markBacktestDirty();
 }
 
 function deleteFavorite(id) {
@@ -1390,8 +1402,9 @@ function setStatus(text, isError = false) {
 
 function updateInteractionLocks() {
   const busy = state.loading;
-  els.runBtn.disabled = busy;
-  els.runBtn.textContent = busy ? t("running") : t("run");
+  els.runBtn.disabled = busy || state.assets.length < 1;
+  els.runBtn.textContent = busy ? t("running") : state.backtestDirty ? t("runPending") : t("run");
+  els.runBtn.classList.toggle("needs-run", state.backtestDirty && !busy);
   els.shareCurrentBtn.disabled = busy;
   els.normalizeBtn.disabled = busy;
   els.startInput.disabled = busy;
@@ -1454,6 +1467,7 @@ async function runBacktest(resetView = true) {
         body: JSON.stringify(requestPayload()),
       });
       state.result = result;
+      state.backtestDirty = false;
       syncVisibleSeries(result);
       mergeCatalogItems(result.assets);
       saveState();
@@ -2009,7 +2023,7 @@ function renderOptimizer(profiles) {
       renderModes();
       refreshSearchSelectionState();
       saveState();
-      runBacktest(true);
+      markBacktestDirty();
       restoreScrollState(scrollSnapshot);
     });
     els.optimizerResults.appendChild(card);
@@ -2080,11 +2094,11 @@ function bindEvents() {
   });
   els.startInput.addEventListener("change", () => {
     saveState();
-    runBacktest(true);
+    markBacktestDirty();
   });
   els.endInput.addEventListener("change", () => {
     saveState();
-    runBacktest(true);
+    markBacktestDirty();
   });
   els.modes.addEventListener("click", (event) => {
     if (state.loading) return;
@@ -2129,7 +2143,7 @@ function bindEvents() {
     state.view = { start: 0, end: state.result.dates.length - 1 };
     saveState();
     if (hasDateRange) {
-      runBacktest(true);
+      markBacktestDirty();
     } else {
       renderChart();
     }
@@ -2167,7 +2181,7 @@ function bindEvents() {
         els.endInput.value = state.result.dates[b];
         state.view = null;
         saveState();
-        runBacktest(true);
+        markBacktestDirty();
         return;
       }
     }

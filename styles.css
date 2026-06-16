@@ -582,6 +582,10 @@ h2 {
   font-weight: 700;
 }
 
+.primary-btn.needs-run {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
 .ghost-btn {
   background: var(--button-bg);
   color: var(--button-text);
