@@ -289,6 +289,49 @@ def record_yahoo_search_failure():
     YAHOO_SEARCH_DISABLED_UNTIL = time.time() + YAHOO_SEARCH_COOLDOWN_SECONDS
 
 
+def looks_like_ticker_query(query):
+    key = query.strip()
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9.\-]{0,9}", key))
+
+
+def yahoo_symbol_fallback_search(query):
+    if not looks_like_ticker_query(query):
+        return []
+    symbol = query.strip().upper()
+    asset_id = f"Y:{symbol}"
+    try:
+        hint = asset_start_hint(asset_id)
+    except Exception as exc:
+        log_event("search.symbol_fallback.error", query=query, error=type(exc).__name__)
+        return []
+    if not hint or not hint.get("hintStart") or hint.get("hintStart") == "不可用":
+        return []
+    return [
+        {
+            "id": asset_id,
+            "symbol": symbol,
+            "name": symbol,
+            "assetClass": "Yahoo",
+            "source": "yahoo",
+            "currency": hint.get("currency") or "",
+            "hintStart": hint.get("hintStart") or "",
+            "lastDate": hint.get("lastDate") or "",
+            "dataCount": int(hint.get("dataCount") or 0),
+            "keywords": symbol,
+            "dynamic": True,
+        }
+    ]
+
+
+def append_search_items(items, existing, candidates, limit):
+    for item in candidates:
+        if item["id"] not in existing:
+            items.append(item)
+            existing.add(item["id"])
+        if len(items) >= limit:
+            break
+
+
 def load_fund_catalog_seed():
     global FUND_LIST_CACHE, FUND_LIST_ERROR
     if FUND_LIST_CACHE is not None:
@@ -1180,7 +1223,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                             reason="cooldown",
                             remaining_seconds=int(max(0, YAHOO_SEARCH_DISABLED_UNTIL - time.time())),
                         )
-                        yahoo_items = []
+                        yahoo_items = yahoo_symbol_fallback_search(query)
                     else:
                         try:
                             yahoo_items = yahoo_search(query)
@@ -1199,13 +1242,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                                 cooldown_seconds=YAHOO_SEARCH_COOLDOWN_SECONDS,
                                 elapsed_ms=int((time.time() - yahoo_started) * 1000),
                             )
-                            yahoo_items = []
-                        for item in yahoo_items:
-                            if item["id"] not in existing:
-                                items.append(item)
-                                existing.add(item["id"])
-                            if len(items) >= 18:
-                                break
+                            yahoo_items = yahoo_symbol_fallback_search(query)
+                    if yahoo_items:
+                        append_search_items(items, existing, yahoo_items, 18)
                 if query and should_search_funds(query):
                     existing = {item["id"] for item in items}
                     fund_started = time.time()
