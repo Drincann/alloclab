@@ -2008,7 +2008,7 @@ function renderOptimizer(profiles) {
       <button type="button">${t("apply")}</button>
     `;
     card.querySelector("button").disabled = state.loading || state.optimizing;
-    card.querySelector("button").addEventListener("click", () => {
+    card.querySelector("button").addEventListener("click", async () => {
       if (state.loading || state.optimizing) return;
       const scrollSnapshot = captureScrollState();
       profile.weights.forEach((weight, i) => {
@@ -2023,7 +2023,7 @@ function renderOptimizer(profiles) {
       renderModes();
       refreshSearchSelectionState();
       saveState();
-      markBacktestDirty();
+      await runBacktest(true);
       restoreScrollState(scrollSnapshot);
     });
     els.optimizerResults.appendChild(card);
