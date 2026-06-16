@@ -148,8 +148,16 @@
           </div>
           <button id="shareCloseBtn" class="icon-btn" type="button" data-i18n-title="close" title="关闭">×</button>
         </div>
-        <div id="shareSummary" class="share-summary"></div>
+        <label id="shareNameRow" class="share-name-row">
+          <span data-i18n="portfolioName">组合名称</span>
+          <input id="shareNameInput" type="text" />
+        </label>
+        <div class="share-hero">
+          <div id="sharePrimaryMetric" class="share-primary-metric"></div>
+          <canvas id="shareCurveCanvas" width="520" height="160"></canvas>
+        </div>
         <div id="shareMetrics" class="share-metrics"></div>
+        <div id="shareSummary" class="share-summary"></div>
         <label class="share-link-row">
           <span data-i18n="shareLink">分享链接</span>
           <input id="shareLinkInput" type="text" readonly />
@@ -157,6 +165,7 @@
         </label>
         <div id="shareStatus" class="share-status"></div>
         <div class="share-actions">
+          <button id="shareCreateBtn" class="primary-btn" type="button" data-i18n="createShareLink">生成分享链接</button>
           <button id="shareApplyBtn" class="primary-btn" type="button" data-i18n="applyToView">应用到当前视图</button>
         </div>
       </section>

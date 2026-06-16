@@ -147,7 +147,7 @@ body {
 }
 
 .share-dialog {
-  width: min(620px, 100%);
+  width: min(720px, 100%);
   max-height: min(720px, calc(100vh - 32px));
   overflow: auto;
   padding: 16px;
@@ -170,6 +170,74 @@ body {
   font-size: 13px;
 }
 
+.share-name-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.share-name-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.share-name-row input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--ink);
+}
+
+.share-hero {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+.share-primary-metric,
+.share-hero canvas {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--item-bg);
+}
+
+.share-primary-metric {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  padding: 14px;
+}
+
+.share-primary-metric span,
+.share-primary-metric em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.share-primary-metric em {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.share-primary-metric strong {
+  color: var(--accent);
+  font-size: 34px;
+  line-height: 1;
+}
+
+.share-hero canvas {
+  width: 100%;
+  height: 160px;
+}
+
 .share-summary,
 .share-metrics {
   display: grid;
@@ -177,16 +245,44 @@ body {
   margin-bottom: 12px;
 }
 
-.share-summary > div,
-.share-metrics > div {
+.share-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.share-metrics > div,
+.share-weight-card,
+.share-rule-card {
   display: grid;
-  grid-template-columns: 110px minmax(0, 1fr);
-  gap: 10px;
-  align-items: baseline;
+  gap: 6px;
   padding: 9px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--item-bg);
+}
+
+.share-summary {
+  grid-template-columns: minmax(0, 1fr) 150px;
+}
+
+.share-weight-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.share-weight-list strong {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.share-weight-list b {
+  color: var(--accent);
 }
 
 .share-summary span,
@@ -1046,8 +1142,10 @@ h2 {
   }
 
   .share-link-row,
-  .share-summary > div,
-  .share-metrics > div {
+  .share-name-row,
+  .share-hero,
+  .share-summary,
+  .share-metrics {
     grid-template-columns: 1fr;
   }
 

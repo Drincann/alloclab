@@ -1263,7 +1263,23 @@ def clean_share_catalog(raw_catalog, assets):
     return catalog
 
 
-def share_metrics_from_backtest(portfolio):
+def sampled_share_curve(dates, nav, limit=96):
+    if not dates or not nav:
+        return []
+    if len(dates) <= limit:
+        indexes = range(len(dates))
+    else:
+        indexes = sorted({round(i * (len(dates) - 1) / (limit - 1)) for i in range(limit)})
+    return [
+        {
+            "date": dates[index],
+            "value": nav[index],
+        }
+        for index in indexes
+    ]
+
+
+def share_profile_from_backtest(portfolio):
     try:
         result = backtest_portfolio(
             [asset["id"] for asset in portfolio["assets"]],
@@ -1283,9 +1299,9 @@ def share_metrics_from_backtest(portfolio):
             "sharpe0": metrics.get("sharpe0"),
             "calmar": metrics.get("calmar"),
             "years": metrics.get("years"),
-        }, result.get("assets", [])
+        }, result.get("assets", []), sampled_share_curve(result.get("dates", []), result.get("nav", []))
     except Exception:
-        return None, []
+        return None, [], []
 
 
 def clean_share_portfolio(raw_portfolio):
@@ -1300,9 +1316,11 @@ def clean_share_portfolio(raw_portfolio):
         "end": clean_share_date(raw_portfolio.get("end")),
         "catalog": clean_share_catalog(raw_portfolio.get("catalog"), assets),
     }
-    metrics, result_assets = share_metrics_from_backtest(portfolio)
+    metrics, result_assets, curve = share_profile_from_backtest(portfolio)
     if metrics:
         portfolio["metrics"] = metrics
+    if curve:
+        portfolio["curve"] = curve
     if result_assets:
         portfolio["catalog"] = clean_share_catalog(result_assets, assets) or portfolio["catalog"]
     return portfolio

@@ -20,7 +20,7 @@ const state = {
   bootstrapped: false,
   language: "zh",
   theme: "light",
-  sharePreview: null,
+  shareDialog: null,
 };
 
 const els = {
@@ -58,11 +58,16 @@ const els = {
   shareOverlay: document.getElementById("shareOverlay"),
   shareCloseBtn: document.getElementById("shareCloseBtn"),
   shareSubtitle: document.getElementById("shareSubtitle"),
+  shareNameRow: document.getElementById("shareNameRow"),
+  shareNameInput: document.getElementById("shareNameInput"),
+  sharePrimaryMetric: document.getElementById("sharePrimaryMetric"),
+  shareCurveCanvas: document.getElementById("shareCurveCanvas"),
   shareSummary: document.getElementById("shareSummary"),
   shareMetrics: document.getElementById("shareMetrics"),
   shareLinkInput: document.getElementById("shareLinkInput"),
   shareCopyBtn: document.getElementById("shareCopyBtn"),
   shareStatus: document.getElementById("shareStatus"),
+  shareCreateBtn: document.getElementById("shareCreateBtn"),
   shareApplyBtn: document.getElementById("shareApplyBtn"),
   rangeLabel: document.getElementById("rangeLabel"),
   chartTitle: document.getElementById("chartTitle"),
@@ -98,13 +103,22 @@ const I18N = {
     favorites: "收藏组合",
     save: "保存",
     share: "分享",
-    sharePreview: "分享预览",
+    sharePreview: "发布分享",
+    sharedViewTitle: "组合详情",
+    shareReady: "分享链接已生成",
     shareLink: "分享链接",
     copy: "复制",
     copied: "已复制",
     close: "关闭",
     applyToView: "应用到当前视图",
+    createShareLink: "生成分享链接",
+    creatingShareLink: "生成中",
     sharedPortfolio: "分享组合",
+    portfolioName: "组合名称",
+    portfolioWeights: "组合比例",
+    shareDraftHint: "确认展示效果后生成链接",
+    shareCreatedHint: "复制链接后发给别人",
+    shareReceivedHint: "这是一个分享给你的组合，应用前不会覆盖当前视图",
     createShareFailed: "生成分享链接失败",
     loadShareFailed: "分享链接读取失败",
     noShareMetrics: "暂无回测指标",
@@ -216,13 +230,22 @@ const I18N = {
     favorites: "Saved portfolios",
     save: "Save",
     share: "Share",
-    sharePreview: "Share Preview",
+    sharePreview: "Publish Share",
+    sharedViewTitle: "Portfolio Details",
+    shareReady: "Share Link Ready",
     shareLink: "Share link",
     copy: "Copy",
     copied: "Copied",
     close: "Close",
     applyToView: "Apply to current view",
+    createShareLink: "Create share link",
+    creatingShareLink: "Creating",
     sharedPortfolio: "Shared portfolio",
+    portfolioName: "Portfolio name",
+    portfolioWeights: "Weights",
+    shareDraftHint: "Review the presentation, then create a link",
+    shareCreatedHint: "Copy the link and send it",
+    shareReceivedHint: "This shared portfolio will not change your current view until you apply it",
     createShareFailed: "Failed to create share link",
     loadShareFailed: "Failed to load share link",
     noShareMetrics: "No backtest metrics yet",
@@ -439,7 +462,7 @@ function rerenderLocalizedContent() {
   } else if (state.bootstrapped) {
     els.chartTitle.textContent = t("equityCurve");
   }
-  renderSharePreview();
+  renderShareDialog();
   updateInteractionLocks();
 }
 
@@ -696,10 +719,26 @@ function currentMetricSnapshot() {
   };
 }
 
+function sampledCurveFromResult(result, limit = 96) {
+  if (!result?.dates?.length || !result?.nav?.length) return [];
+  if (result.dates.length <= limit) {
+    return result.dates.map((date, index) => ({ date, value: result.nav[index] }));
+  }
+  const indexes = new Set();
+  for (let i = 0; i < limit; i += 1) {
+    indexes.add(Math.round((i * (result.dates.length - 1)) / (limit - 1)));
+  }
+  return Array.from(indexes)
+    .sort((a, b) => a - b)
+    .map((index) => ({ date: result.dates[index], value: result.nav[index] }));
+}
+
 function currentShareSnapshot(name = "") {
   const snapshot = currentFavoriteSnapshot(name || t("sharedPortfolio"));
   const metrics = currentMetricSnapshot();
   if (metrics) snapshot.metrics = metrics;
+  const curve = sampledCurveFromResult(state.result);
+  if (curve.length) snapshot.curve = curve;
   return snapshot;
 }
 
@@ -712,12 +751,6 @@ function shareUrlForToken(token) {
 
 function shareTokenFromUrl() {
   return new URLSearchParams(window.location.search).get("share") || "";
-}
-
-function shareAssetText(portfolio) {
-  return (portfolio.assets || [])
-    .map((asset) => `${asset.id} ${Math.round(Number(asset.weight || 0))}%`)
-    .join(" / ");
 }
 
 function shareDateText(portfolio) {
@@ -733,61 +766,150 @@ function shareMetricRows(portfolio) {
   const metrics = portfolio.metrics || {};
   if (!Object.keys(metrics).length) return [];
   return [
-    [t("cagr"), fmtPct(metrics.cagr)],
     [t("sharpe"), fmtNum(metrics.sharpe0)],
     [t("maxDrawdown"), fmtPct(metrics.maxDrawdown)],
     [t("volatility"), fmtPct(metrics.volatility)],
   ];
 }
 
-function renderSharePreview() {
-  const preview = state.sharePreview;
-  if (!preview) {
+function shareTitleForMode(mode) {
+  if (mode === "received") return t("sharedViewTitle");
+  if (mode === "created") return t("shareReady");
+  return t("sharePreview");
+}
+
+function shareSubtitleForMode(mode) {
+  if (mode === "received") return t("shareReceivedHint");
+  if (mode === "created") return t("shareCreatedHint");
+  return t("shareDraftHint");
+}
+
+function drawShareCurve(portfolio) {
+  const canvas = els.shareCurveCanvas;
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * scale));
+  const height = Math.max(1, Math.round(rect.height * scale));
+  canvas.width = width;
+  canvas.height = height;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  const curve = portfolio.curve || [];
+  if (curve.length < 2) {
+    ctx.fillStyle = cssVar("--muted");
+    ctx.font = "12px sans-serif";
+    ctx.fillText(t("noShareMetrics"), 12, 28);
+    return;
+  }
+  const values = curve.map((point) => Number(point.value)).filter((value) => Number.isFinite(value));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const pad = { left: 10, right: 10, top: 12, bottom: 20 };
+  const x = (index) => pad.left + (index / (curve.length - 1)) * (rect.width - pad.left - pad.right);
+  const y = (value) => pad.top + ((max - value) / span) * (rect.height - pad.top - pad.bottom);
+  const gradient = ctx.createLinearGradient(0, pad.top, 0, rect.height - pad.bottom);
+  gradient.addColorStop(0, "rgba(18, 108, 118, 0.28)");
+  gradient.addColorStop(1, "rgba(18, 108, 118, 0.02)");
+  ctx.beginPath();
+  curve.forEach((point, index) => {
+    const px = x(index);
+    const py = y(Number(point.value));
+    if (index === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.lineTo(rect.width - pad.right, rect.height - pad.bottom);
+  ctx.lineTo(pad.left, rect.height - pad.bottom);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.beginPath();
+  curve.forEach((point, index) => {
+    const px = x(index);
+    const py = y(Number(point.value));
+    if (index === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.strokeStyle = cssVar("--accent");
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = cssVar("--muted");
+  ctx.font = "11px sans-serif";
+  ctx.fillText(curve[0].date || "", pad.left, rect.height - 5);
+  const lastDate = curve[curve.length - 1].date || "";
+  const textWidth = ctx.measureText(lastDate).width;
+  ctx.fillText(lastDate, rect.width - pad.right - textWidth, rect.height - 5);
+}
+
+function renderShareDialog() {
+  const dialog = state.shareDialog;
+  if (!dialog) {
     els.shareOverlay.classList.remove("active");
     els.shareOverlay.setAttribute("aria-hidden", "true");
     return;
   }
-  const portfolio = preview.portfolio;
-  els.shareSubtitle.textContent = portfolio.name || t("sharedPortfolio");
+  const portfolio = dialog.portfolio;
+  const metrics = portfolio.metrics || {};
+  els.shareOverlay.dataset.mode = dialog.mode;
+  document.getElementById("shareTitle").textContent = shareTitleForMode(dialog.mode);
+  els.shareSubtitle.textContent = shareSubtitleForMode(dialog.mode);
+  els.shareNameRow.style.display = dialog.mode === "draft" ? "grid" : "none";
+  if (dialog.mode === "draft" && els.shareNameInput.value !== portfolio.name) {
+    els.shareNameInput.value = portfolio.name || "";
+  }
+  els.sharePrimaryMetric.innerHTML = `
+    <span>${escapeHtml(t("cagr"))}</span>
+    <strong>${escapeHtml(fmtPct(metrics.cagr))}</strong>
+    <em>${escapeHtml(shareDateText(portfolio))}</em>
+  `;
   els.shareSummary.innerHTML = `
-    <div>
-      <span>${t("assets")}</span>
-      <strong>${escapeHtml(shareAssetText(portfolio))}</strong>
+    <div class="share-weight-card">
+      <span>${escapeHtml(t("portfolioWeights"))}</span>
+      <div class="share-weight-list">
+        ${(portfolio.assets || [])
+          .map((asset) => `<strong>${escapeHtml(asset.id)} <b>${Math.round(Number(asset.weight || 0))}%</b></strong>`)
+          .join("")}
+      </div>
     </div>
-    <div>
-      <span>${t("rebalance")}</span>
+    <div class="share-rule-card">
+      <span>${escapeHtml(t("rebalance"))}</span>
       <strong>${escapeHtml(rebalanceLabel(portfolio.rebalance))}</strong>
-    </div>
-    <div>
-      <span>${t("date")}</span>
-      <strong>${escapeHtml(shareDateText(portfolio))}</strong>
     </div>
   `;
   const metricRows = shareMetricRows(portfolio);
   els.shareMetrics.innerHTML = metricRows.length
     ? metricRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")
     : `<div class="status">${t("noShareMetrics")}</div>`;
-  els.shareLinkInput.value = preview.url || "";
-  els.shareLinkInput.parentElement.style.display = preview.url ? "grid" : "none";
-  els.shareStatus.textContent = preview.status || "";
+  els.shareLinkInput.value = dialog.url || "";
+  els.shareLinkInput.parentElement.style.display = dialog.mode === "created" ? "grid" : "none";
+  els.shareCopyBtn.style.display = dialog.mode === "created" ? "" : "none";
+  els.shareStatus.textContent = dialog.status || "";
+  els.shareCreateBtn.style.display = dialog.mode === "draft" ? "" : "none";
+  els.shareCreateBtn.disabled = state.loading || dialog.generating;
+  els.shareCreateBtn.textContent = dialog.generating ? t("creatingShareLink") : t("createShareLink");
+  els.shareApplyBtn.style.display = dialog.mode === "received" ? "" : "none";
   els.shareApplyBtn.disabled = state.loading;
   els.shareOverlay.classList.add("active");
   els.shareOverlay.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => drawShareCurve(portfolio));
 }
 
-function showSharePreview(portfolio, options = {}) {
+function showShareDialog(portfolio, options = {}) {
   mergeCatalogItems(portfolio.catalog || []);
-  state.sharePreview = {
+  state.shareDialog = {
+    mode: options.mode || "draft",
     portfolio,
     url: options.url || "",
     status: options.status || "",
+    generating: false,
   };
-  renderSharePreview();
+  renderShareDialog();
 }
 
-function closeSharePreview() {
-  state.sharePreview = null;
-  renderSharePreview();
+function closeShareDialog() {
+  state.shareDialog = null;
+  renderShareDialog();
 }
 
 async function createShare(portfolio) {
@@ -801,12 +923,74 @@ async function createShare(portfolio) {
   };
 }
 
+function backtestMetricsFromResult(result) {
+  const m = result.metrics || {};
+  return {
+    start: m.start || "",
+    end: m.end || "",
+    cagr: m.cagr,
+    totalReturn: m.totalReturn,
+    maxDrawdown: m.maxDrawdown,
+    volatility: m.volatility,
+    sharpe0: m.sharpe0,
+    calmar: m.calmar,
+    years: m.years,
+  };
+}
+
+async function enrichShareDraft(portfolio) {
+  if (portfolio.metrics && portfolio.curve?.length) return portfolio;
+  try {
+    const result = await api("/api/backtest", {
+      method: "POST",
+      body: JSON.stringify({
+        assets: portfolio.assets,
+        rebalance: portfolio.rebalance,
+        start: portfolio.start || null,
+        end: portfolio.end || null,
+      }),
+    });
+    return {
+      ...portfolio,
+      metrics: backtestMetricsFromResult(result),
+      curve: sampledCurveFromResult(result),
+      catalog: result.assets || portfolio.catalog || [],
+    };
+  } catch {
+    return portfolio;
+  }
+}
+
 async function sharePortfolio(portfolio) {
+  const draft = {
+    ...portfolio,
+    name: portfolio.name || t("sharedPortfolio"),
+  };
+  showShareDialog(draft, { mode: "draft" });
+  const enriched = await enrichShareDraft(draft);
+  if (!state.shareDialog || state.shareDialog.mode !== "draft") return;
+  state.shareDialog.portfolio = {
+    ...enriched,
+    name: els.shareNameInput.value.trim() || enriched.name,
+  };
+  renderShareDialog();
+}
+
+async function createShareFromDialog() {
+  const dialog = state.shareDialog;
+  if (!dialog || dialog.mode !== "draft" || dialog.generating) return;
+  const portfolio = {
+    ...dialog.portfolio,
+    name: els.shareNameInput.value.trim() || dialog.portfolio.name || t("sharedPortfolio"),
+  };
+  state.shareDialog = { ...dialog, portfolio, generating: true, status: "" };
+  renderShareDialog();
   try {
     const created = await createShare(portfolio);
-    showSharePreview(created.portfolio, { url: created.url });
+    showShareDialog(created.portfolio, { mode: "created", url: created.url });
   } catch (error) {
-    showSharePreview(portfolio, { status: error.message || t("createShareFailed") });
+    state.shareDialog = { mode: "draft", portfolio, url: "", status: error.message || t("createShareFailed"), generating: false };
+    renderShareDialog();
   }
 }
 
@@ -827,7 +1011,7 @@ async function loadSharedPortfolioFromUrl() {
   if (!token) return;
   try {
     const data = await api(`/api/share?token=${encodeURIComponent(token)}`);
-    showSharePreview(data.portfolio, { url: window.location.href });
+    showShareDialog(data.portfolio, { mode: "received", url: window.location.href });
   } catch (error) {
     setStatus(error.message || t("loadShareFailed"), true);
   }
@@ -1124,7 +1308,7 @@ function applyPortfolioSnapshot(portfolio) {
     renderModes();
     refreshSearchSelectionState();
   });
-  closeSharePreview();
+  closeShareDialog();
   saveState();
   runBacktest(true);
 }
@@ -1197,7 +1381,8 @@ function updateInteractionLocks() {
   for (const button of els.optimizerResults.querySelectorAll("button")) {
     button.disabled = busy || state.optimizing;
   }
-  if (state.sharePreview) {
+  if (state.shareDialog) {
+    els.shareCreateBtn.disabled = busy || state.shareDialog.generating;
     els.shareApplyBtn.disabled = busy;
   }
 }
@@ -1826,14 +2011,19 @@ function bindEvents() {
     if (state.loading) return;
     sharePortfolio(currentShareSnapshot());
   });
-  els.shareCloseBtn.addEventListener("click", closeSharePreview);
+  els.shareCloseBtn.addEventListener("click", closeShareDialog);
   els.shareOverlay.addEventListener("click", (event) => {
-    if (event.target === els.shareOverlay) closeSharePreview();
+    if (event.target === els.shareOverlay) closeShareDialog();
   });
+  els.shareNameInput.addEventListener("input", () => {
+    if (!state.shareDialog || state.shareDialog.mode !== "draft") return;
+    state.shareDialog.portfolio.name = els.shareNameInput.value;
+  });
+  els.shareCreateBtn.addEventListener("click", createShareFromDialog);
   els.shareCopyBtn.addEventListener("click", copyShareLink);
   els.shareApplyBtn.addEventListener("click", () => {
-    if (!state.sharePreview) return;
-    applyPortfolioSnapshot(state.sharePreview.portfolio);
+    if (!state.shareDialog || state.shareDialog.mode !== "received") return;
+    applyPortfolioSnapshot(state.shareDialog.portfolio);
   });
   els.favoriteNameInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") saveFavorite();
