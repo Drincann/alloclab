@@ -192,6 +192,18 @@ const I18N = {
     ulcerIndex: "痛苦指数",
     years: "年数",
     rebalanceCount: "再平衡次数",
+    cagrHelp: "按回测起止日期折算的年化复合收益率。",
+    totalReturnHelp: "组合从回测开始到结束的累计收益。",
+    maxDrawdownHelp: "回测期间从历史高点到随后低点的最大跌幅。",
+    volatilityHelp: "按日收益率年化后的波动水平，越高代表净值波动越大。",
+    sharpeHelp: "以 0 无风险利率估算的收益/波动比，用于粗略比较风险调整后收益。",
+    calmarHelp: "年化收益除以最大回撤绝对值，用于观察收益和回撤的平衡。",
+    winRateHelp: "日收益率大于 0 的交易日占比。",
+    worstDayHelp: "回测期间单日收益率最低的一天。",
+    bestDayHelp: "回测期间单日收益率最高的一天。",
+    ulcerIndexHelp: "回撤深度和持续性的综合指标，数值越低代表回撤体验越平缓。",
+    yearsHelp: "本次回测覆盖的自然年长度。",
+    rebalanceCountHelp: "按当前再平衡规则实际触发的调仓次数。",
     annualShort: "年化",
     drawdownShort: "回撤",
     sharpeShort: "夏普",
@@ -323,6 +335,18 @@ const I18N = {
     ulcerIndex: "Ulcer index",
     years: "Years",
     rebalanceCount: "Rebalances",
+    cagrHelp: "Annualized compound return over the selected backtest period.",
+    totalReturnHelp: "Cumulative portfolio return from the start to the end of the backtest.",
+    maxDrawdownHelp: "Largest peak-to-trough decline during the backtest.",
+    volatilityHelp: "Annualized volatility based on daily returns; higher means a rougher ride.",
+    sharpeHelp: "Return-to-volatility ratio using a 0% risk-free rate, useful for rough risk-adjusted comparison.",
+    calmarHelp: "CAGR divided by absolute max drawdown, showing return relative to drawdown.",
+    winRateHelp: "Share of trading days with positive daily returns.",
+    worstDayHelp: "The lowest single-day return in the backtest.",
+    bestDayHelp: "The highest single-day return in the backtest.",
+    ulcerIndexHelp: "A drawdown severity measure that combines drawdown depth and persistence; lower is smoother.",
+    yearsHelp: "Calendar-year length covered by this backtest.",
+    rebalanceCountHelp: "Number of actual rebalance events triggered by the current rule.",
     annualShort: "CAGR",
     drawdownShort: "MDD",
     sharpeShort: "Sharpe",
@@ -1619,24 +1643,27 @@ function renderAll() {
 function renderMetrics() {
   const m = state.result.metrics;
   const cards = [
-    [t("cagr"), fmtPct(m.cagr), m.cagr >= 0 ? "positive" : "negative"],
-    [t("totalReturn"), fmtPct(m.totalReturn), m.totalReturn >= 0 ? "positive" : "negative"],
-    [t("maxDrawdown"), fmtPct(m.maxDrawdown), "negative"],
-    [t("volatility"), fmtPct(m.volatility), ""],
-    [t("sharpe"), fmtNum(m.sharpe0), ""],
-    [t("calmar"), fmtNum(m.calmar), ""],
-    [t("winRate"), fmtPct(m.winRate), ""],
-    [t("worstDay"), fmtPct(m.worstDay), "negative"],
-    [t("bestDay"), fmtPct(m.bestDay), "positive"],
-    [t("ulcerIndex"), fmtPct(m.ulcerIndex), ""],
-    [t("years"), fmtNum(m.years, 1), ""],
-    [t("rebalanceCount"), String(m.rebalanceCount), ""],
+    [t("cagr"), fmtPct(m.cagr), m.cagr >= 0 ? "positive" : "negative", t("cagrHelp")],
+    [t("totalReturn"), fmtPct(m.totalReturn), m.totalReturn >= 0 ? "positive" : "negative", t("totalReturnHelp")],
+    [t("maxDrawdown"), fmtPct(m.maxDrawdown), "negative", t("maxDrawdownHelp")],
+    [t("volatility"), fmtPct(m.volatility), "", t("volatilityHelp")],
+    [t("sharpe"), fmtNum(m.sharpe0), "", t("sharpeHelp")],
+    [t("calmar"), fmtNum(m.calmar), "", t("calmarHelp")],
+    [t("winRate"), fmtPct(m.winRate), "", t("winRateHelp")],
+    [t("worstDay"), fmtPct(m.worstDay), "negative", t("worstDayHelp")],
+    [t("bestDay"), fmtPct(m.bestDay), "positive", t("bestDayHelp")],
+    [t("ulcerIndex"), fmtPct(m.ulcerIndex), "", t("ulcerIndexHelp")],
+    [t("years"), fmtNum(m.years, 1), "", t("yearsHelp")],
+    [t("rebalanceCount"), String(m.rebalanceCount), "", t("rebalanceCountHelp")],
   ];
   els.metricsGrid.innerHTML = cards
     .map(
-      ([label, value, klass]) => `
+      ([label, value, klass, help]) => `
         <div class="metric-card ${klass}">
-          <span>${label}</span>
+          <div class="metric-label">
+            <span>${escapeHtml(label)}</span>
+            <span class="metric-help" tabindex="0" role="note" aria-label="${escapeHtml(help)}" data-tooltip="${escapeHtml(help)}">?</span>
+          </div>
           <strong>${value}</strong>
         </div>
       `,
