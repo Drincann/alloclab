@@ -2205,9 +2205,8 @@ async function bootstrapApp() {
     state.bootstrapped = true;
     if (hasShareToken) {
       await loadSharedPortfolioFromUrl();
-    } else {
-      await runBacktest(true);
     }
+    await runBacktest(true);
   } catch (error) {
     setStatus(error.message, true);
   }
