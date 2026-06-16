@@ -146,6 +146,7 @@ MIN_BACKTEST_DAYS = 30
 DATA_UNAVAILABLE_HINT = "不可用"
 DATA_UNAVAILABLE_REASON = "行情不可用"
 INSUFFICIENT_DATA_REASON = "数据不足"
+MAX_MARKET_START_DRIFT_DAYS = 365 * 2
 BITCOIN_YAHOO_FALLBACKS = [
     {"symbol": "BTC-USD", "name": "Bitcoin USD", "assetClass": "CRYPTOCURRENCY", "currency": "USD"},
     {"symbol": "BTC=F", "name": "Bitcoin Futures", "assetClass": "FUTURE", "currency": "USD"},
@@ -827,17 +828,70 @@ def fetch_sina(symbol):
     )
 
 
-def get_series(asset_id):
+def _series_starts_too_late(asset_id, rows, hint_start=""):
+    if not rows:
+        return False
+    hint = hint_start
+    if not hint:
+        meta = get_asset_meta(asset_id)
+        if not meta:
+            return False
+        hint = meta.get("hintStart") or ""
+    if not hint:
+        return False
+    try:
+        row_start = datetime.strptime(rows[0]["date"], "%Y-%m-%d")
+        expected_start = datetime.strptime(hint, "%Y-%m-%d")
+        return (row_start - expected_start).days > MAX_MARKET_START_DRIFT_DAYS
+    except Exception:
+        return False
+
+
+def _yahoo_series_with_backfill(meta, symbol):
+    rows = fetch_yahoo(meta["symbol"])
+    if not _series_starts_too_late(meta["id"], rows, meta.get("hintStart", "")):
+        return rows
+
+    log_event(
+        "market.series.start_gap",
+        symbol=meta["id"],
+        start=rows[0]["date"],
+        expected_hint=meta.get("hintStart") or "",
+        count=len(rows),
+        source="yahoo",
+    )
+    try:
+        fallback_rows = fetch_sina_us_daily(symbol)
+    except Exception:
+        return rows
+
+    if not _series_starts_too_late(meta["id"], fallback_rows, meta.get("hintStart", "")):
+        return fallback_rows
+    return rows if rows[0]["date"] <= fallback_rows[0]["date"] else fallback_rows
+
+
+def get_series(asset_id, force_refresh=False):
     dynamic_meta = get_asset_meta(asset_id)
     if dynamic_meta is None:
         raise ValueError(f"未知标的：{asset_id}")
-    if asset_id in SERIES_CACHE:
-        return SERIES_CACHE[asset_id]
+
+    if not force_refresh and asset_id in SERIES_CACHE:
+        cached = SERIES_CACHE[asset_id]
+        if _series_starts_too_late(asset_id, cached):
+            SERIES_CACHE.pop(asset_id, None)
+            log_event(
+                "market.series.cache_drift",
+                symbol=asset_id,
+                cached_start=cached[0]["date"],
+                cached_count=len(cached),
+            )
+        else:
+            return cached
 
     meta = dynamic_meta
     source = meta["source"]
     if source == "yahoo":
-        rows = fetch_yahoo(meta["symbol"])
+        rows = _yahoo_series_with_backfill(meta, meta["symbol"])
     elif source == "csindex":
         rows = fetch_csindex(meta["symbol"])
     elif source == "fund_nav_accum":
@@ -849,6 +903,16 @@ def get_series(asset_id):
 
     if not rows:
         raise RuntimeError(f"没有获取到 {asset_id} 的行情数据")
+
+    if _series_starts_too_late(asset_id, rows):
+        log_event(
+            "market.series.start_gap",
+            symbol=asset_id,
+            start=rows[0]["date"],
+            expected_hint=meta.get("hintStart") or "",
+            count=len(rows),
+            source=source,
+        )
     SERIES_CACHE[asset_id] = rows
     return rows
 
