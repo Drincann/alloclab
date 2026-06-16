@@ -1039,7 +1039,7 @@ h2 {
 .metric-card .metric-help::after {
   content: attr(data-tooltip);
   position: absolute;
-  right: 0;
+  left: 0;
   bottom: calc(100% + 8px);
   z-index: 8;
   width: 320px;
@@ -1059,6 +1059,12 @@ h2 {
   pointer-events: none;
   transform: translateY(4px);
   transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.metric-card:nth-child(6n+5) .metric-help::after,
+.metric-card:nth-child(6n) .metric-help::after {
+  right: 0;
+  left: auto;
 }
 
 .metric-card .metric-help:hover::after,
@@ -1258,6 +1264,16 @@ h2 {
     grid-template-columns: repeat(3, 1fr);
   }
 
+  .metric-card .metric-help::after {
+    right: auto;
+    left: 0;
+  }
+
+  .metric-card:nth-child(3n) .metric-help::after {
+    right: 0;
+    left: auto;
+  }
+
   .lower-grid {
     grid-template-columns: 1fr;
   }
@@ -1293,6 +1309,16 @@ h2 {
 
   .metrics-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .metric-card .metric-help::after {
+    right: auto;
+    left: 0;
+  }
+
+  .metric-card:nth-child(2n) .metric-help::after {
+    right: 0;
+    left: auto;
   }
 
   .segmented {
