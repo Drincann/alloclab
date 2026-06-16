@@ -160,8 +160,18 @@ body {
 .share-head {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.share-head .icon-btn {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  line-height: 1;
 }
 
 .share-head p {
