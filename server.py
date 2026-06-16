@@ -7,6 +7,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -175,6 +176,10 @@ def log_event(event, **fields):
     print(f"[alloclab] {timestamp} {event} {detail}".rstrip(), flush=True)
 
 
+def http_error_status(exc):
+    return getattr(exc, "code", "") if isinstance(exc, urllib.error.HTTPError) else ""
+
+
 def http_get_json(url, headers=None, timeout=30):
     req = urllib.request.Request(
         url,
@@ -237,10 +242,73 @@ def fetch_sina_us_daily(symbol):
     return sorted(rows, key=lambda item: item["date"])
 
 
+def fetch_eastmoney_us_daily(symbol):
+    normalized_symbol = symbol.upper().split(".")[0]
+    hosts = ["https://63.push2his.eastmoney.com", "https://push2his.eastmoney.com"]
+    # 105 is Nasdaq, 106 is NYSE. Trying both keeps dynamic Yahoo symbols usable.
+    secids = [f"105.{normalized_symbol}", f"106.{normalized_symbol}"]
+    last_error = None
+    for host in hosts:
+        for secid in secids:
+            params = urllib.parse.urlencode(
+                {
+                    "secid": secid,
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                    "klt": "101",
+                    "fqt": "1",
+                    "beg": "19900101",
+                    "end": "20500000",
+                    "lmt": "1000000",
+                }
+            )
+            url = f"{host}/api/qt/stock/kline/get?{params}"
+            try:
+                data = http_get_json(
+                    url,
+                    headers={
+                        "Referer": "https://quote.eastmoney.com/",
+                        "Origin": "https://quote.eastmoney.com",
+                    },
+                    timeout=30,
+                )
+                klines = (data.get("data") or {}).get("klines") or []
+                rows = []
+                for line in klines:
+                    parts = str(line).split(",")
+                    if len(parts) < 3:
+                        continue
+                    date = parts[0]
+                    close = float(parts[2])
+                    if close > 0:
+                        rows.append({"date": date, "close": close})
+                if rows:
+                    return sorted(rows, key=lambda item: item["date"])
+            except Exception as exc:
+                last_error = exc
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Eastmoney US daily data unavailable: {normalized_symbol}")
+
+
 def fetch_yahoo(symbol):
     try:
         return fetch_yahoo_chart(symbol)
     except Exception as yahoo_exc:
+        try:
+            rows = fetch_eastmoney_us_daily(symbol)
+            if rows:
+                log_event("market.yahoo_fallback.eastmoney_us", symbol=symbol, count=len(rows))
+                return rows
+        except Exception as eastmoney_exc:
+            log_event(
+                "market.yahoo_fallback.eastmoney_us_error",
+                symbol=symbol,
+                yahoo_error=type(yahoo_exc).__name__,
+                yahoo_status=http_error_status(yahoo_exc),
+                eastmoney_error=type(eastmoney_exc).__name__,
+                eastmoney_status=http_error_status(eastmoney_exc),
+            )
         try:
             rows = fetch_sina_us_daily(symbol)
             if rows:
@@ -251,7 +319,9 @@ def fetch_yahoo(symbol):
                 "market.yahoo_fallback.sina_us_error",
                 symbol=symbol,
                 yahoo_error=type(yahoo_exc).__name__,
+                yahoo_status=http_error_status(yahoo_exc),
                 sina_error=type(sina_exc).__name__,
+                sina_status=http_error_status(sina_exc),
             )
         raise yahoo_exc
 
@@ -915,34 +985,52 @@ def _fallback_rows_acceptable(rows, hint_start=""):
     return bool(rows) and "large_gap" not in warnings and "start_late" not in warnings, warnings
 
 
+def _fallback_source_rows(source, fetcher, symbol, log_symbol, hint_start=""):
+    rows = fetcher(symbol)
+    acceptable, warnings = _fallback_rows_acceptable(rows, hint_start)
+    if not acceptable:
+        log_event(
+            f"market.yahoo_fallback.{source}_rejected",
+            symbol=log_symbol,
+            count=len(rows),
+            start=rows[0]["date"] if rows else "",
+            warnings=",".join(warnings),
+        )
+        return None
+    return rows
+
+
 def _yahoo_series_with_backfill(meta, symbol):
     hint_start = meta.get("hintStart", "")
     try:
         rows = fetch_yahoo_chart(meta["symbol"])
     except Exception as yahoo_exc:
-        log_event("market.yahoo.error", symbol=meta["id"], error=type(yahoo_exc).__name__)
-        try:
-            fallback_rows = fetch_sina_us_daily(symbol)
-        except Exception as sina_exc:
-            log_event(
-                "market.yahoo_fallback.sina_us_error",
-                symbol=meta["id"],
-                yahoo_error=type(yahoo_exc).__name__,
-                sina_error=type(sina_exc).__name__,
-            )
-            raise yahoo_exc
-        acceptable, warnings = _fallback_rows_acceptable(fallback_rows, hint_start)
-        if not acceptable:
-            log_event(
-                "market.yahoo_fallback.sina_us_rejected",
-                symbol=meta["id"],
-                count=len(fallback_rows),
-                start=fallback_rows[0]["date"] if fallback_rows else "",
-                warnings=",".join(warnings),
-            )
-            raise yahoo_exc
-        log_event("market.yahoo_fallback.sina_us", symbol=meta["id"], count=len(fallback_rows))
-        return fallback_rows
+        log_event(
+            "market.yahoo.error",
+            symbol=meta["id"],
+            error=type(yahoo_exc).__name__,
+            status=http_error_status(yahoo_exc),
+        )
+        for source, fetcher in (
+            ("eastmoney_us", fetch_eastmoney_us_daily),
+            ("sina_us", fetch_sina_us_daily),
+        ):
+            try:
+                fallback_rows = _fallback_source_rows(source, fetcher, symbol, meta["id"], hint_start)
+            except Exception as exc:
+                log_event(
+                    f"market.yahoo_fallback.{source}_error",
+                    symbol=meta["id"],
+                    yahoo_error=type(yahoo_exc).__name__,
+                    yahoo_status=http_error_status(yahoo_exc),
+                    fallback_error=type(exc).__name__,
+                    fallback_status=http_error_status(exc),
+                )
+                continue
+            if fallback_rows:
+                log_event(f"market.yahoo_fallback.{source}", symbol=meta["id"], count=len(fallback_rows))
+                return fallback_rows
+        raise yahoo_exc
 
     if not hint_start:
         return rows
@@ -967,20 +1055,26 @@ def _yahoo_series_with_backfill(meta, symbol):
         count=len(rows),
         source="yahoo",
     )
-    try:
-        fallback_rows = fetch_sina_us_daily(symbol)
-    except Exception:
-        return rows
-
-    acceptable, warnings = _fallback_rows_acceptable(fallback_rows, hint_start)
-    if not acceptable:
-        log_event(
-            "market.yahoo_fallback.sina_us_rejected",
-            symbol=meta["id"],
-            count=len(fallback_rows),
-            start=fallback_rows[0]["date"] if fallback_rows else "",
-            warnings=",".join(warnings),
-        )
+    fallback_rows = None
+    for source, fetcher in (
+        ("eastmoney_us", fetch_eastmoney_us_daily),
+        ("sina_us", fetch_sina_us_daily),
+    ):
+        try:
+            fallback_rows = _fallback_source_rows(source, fetcher, symbol, meta["id"], hint_start)
+        except Exception as exc:
+            log_event(
+                f"market.yahoo_fallback.{source}_error",
+                symbol=meta["id"],
+                yahoo_error="start_gap",
+                fallback_error=type(exc).__name__,
+                fallback_status=http_error_status(exc),
+            )
+            continue
+        if fallback_rows:
+            log_event(f"market.yahoo_fallback.{source}", symbol=meta["id"], count=len(fallback_rows))
+            break
+    if not fallback_rows:
         return rows
 
     if not rows:
