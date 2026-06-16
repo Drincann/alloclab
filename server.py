@@ -137,9 +137,13 @@ OPTIMIZE_CACHE = {}
 FUND_LIST_CACHE = None
 FUND_LIST_LOADING = False
 FUND_LIST_ERROR = None
-FUND_START_CACHE = {}
+FUND_PROFILE_CACHE = {}
 YAHOO_SEARCH_DISABLED_UNTIL = 0
 YAHOO_SEARCH_COOLDOWN_SECONDS = 5 * 60
+MIN_BACKTEST_DAYS = 30
+DATA_UNAVAILABLE_HINT = "不可用"
+DATA_UNAVAILABLE_REASON = "行情不可用"
+INSUFFICIENT_DATA_REASON = "数据不足"
 BITCOIN_YAHOO_FALLBACKS = [
     {"symbol": "BTC-USD", "name": "Bitcoin USD", "assetClass": "CRYPTOCURRENCY", "currency": "USD"},
     {"symbol": "BTC=F", "name": "Bitcoin Futures", "assetClass": "FUTURE", "currency": "USD"},
@@ -320,11 +324,22 @@ def yahoo_symbol_fallback_search(query):
         symbol = candidate["symbol"].upper()
         asset_id = f"Y:{symbol}"
         try:
-            hint = asset_start_hint(asset_id)
+            meta = {
+                "id": asset_id,
+                "symbol": symbol,
+                "name": candidate.get("name") or symbol,
+                "assetClass": candidate.get("assetClass") or "Yahoo",
+                "source": "yahoo",
+                "currency": candidate.get("currency") or "",
+                "hintStart": "",
+                "keywords": f"{symbol} {candidate.get('name') or ''}",
+                "dynamic": True,
+            }
+            hint = enrich_asset_market_profile(meta)
         except Exception as exc:
             log_event("search.symbol_fallback.error", query=query, symbol=symbol, error=type(exc).__name__)
             continue
-        if not hint or not hint.get("hintStart") or hint.get("hintStart") == "不可用":
+        if not hint or not hint.get("hintStart") or hint.get("hintStart") == DATA_UNAVAILABLE_HINT:
             continue
         items.append(
             {
@@ -337,6 +352,7 @@ def yahoo_symbol_fallback_search(query):
                 "hintStart": hint.get("hintStart") or "",
                 "lastDate": hint.get("lastDate") or "",
                 "dataCount": int(hint.get("dataCount") or 0),
+                "disabledReason": hint.get("disabledReason") or "",
                 "keywords": f"{symbol} {candidate.get('name') or ''}",
                 "dynamic": True,
             }
@@ -472,28 +488,9 @@ def start_fund_catalog_load():
     log_event("fund_catalog.loading")
 
 
-def fund_catalog_if_ready():
-    if FUND_LIST_CACHE is not None:
-        return FUND_LIST_CACHE
-    seed_rows = load_fund_catalog_seed()
-    if seed_rows is not None:
-        return seed_rows
-    start_fund_catalog_load()
-    return None
-
-
-def fund_catalog_status():
-    return {
-        "ready": FUND_LIST_CACHE is not None,
-        "loading": FUND_LIST_LOADING,
-        "count": len(FUND_LIST_CACHE or []),
-        "error": FUND_LIST_ERROR,
-    }
-
-
-def fetch_fund_start_date(code):
-    if code in FUND_START_CACHE:
-        return FUND_START_CACHE[code]
+def fetch_fund_profile(code):
+    if code in FUND_PROFILE_CACHE:
+        return dict(FUND_PROFILE_CACHE[code])
     try:
         first_page = http_get_json(
             "https://api.fund.eastmoney.com/f10/lsjz?"
@@ -502,9 +499,10 @@ def fetch_fund_start_date(code):
             timeout=15,
         )
         total = int(first_page.get("TotalCount") or 0)
+        first_rows = first_page.get("Data", {}).get("LSJZList", [])
+        last_date = first_rows[0].get("FSRQ", "") if first_rows else ""
         if total <= 1:
-            rows = first_page.get("Data", {}).get("LSJZList", [])
-            start = rows[0].get("FSRQ", "") if rows else ""
+            start = last_date
         else:
             last_page = http_get_json(
                 "https://api.fund.eastmoney.com/f10/lsjz?"
@@ -515,113 +513,27 @@ def fetch_fund_start_date(code):
             rows = last_page.get("Data", {}).get("LSJZList", [])
             start = rows[0].get("FSRQ", "") if rows else ""
     except Exception:
-        start = "不可用"
-    FUND_START_CACHE[code] = start or "不可用"
-    return FUND_START_CACHE[code]
+        start = DATA_UNAVAILABLE_HINT
+        last_date = ""
+        total = 0
+    profile = {
+        "hintStart": start or DATA_UNAVAILABLE_HINT,
+        "lastDate": last_date or "",
+        "dataCount": total,
+    }
+    FUND_PROFILE_CACHE[code] = profile
+    return dict(profile)
 
 
 def dynamic_fund_hint_start(code):
-    return CATALOG_BY_ID.get(code, {}).get("hintStart") or "查询中"
-
-
-def fund_start_hint(asset_id):
-    if asset_id in CATALOG_BY_ID:
-        return CATALOG_BY_ID[asset_id].get("hintStart", "") or "不可用"
-    if asset_id.startswith("F:"):
-        return fetch_fund_start_date(asset_id[2:])
-    return ""
-
-
-def fund_start_hints(asset_ids):
-    hints = []
-    normalized_ids = []
-    seen = set()
-    for asset_id in asset_ids:
-        asset_id = str(asset_id or "").strip()
-        if not asset_id or asset_id in seen:
-            continue
-        seen.add(asset_id)
-        if asset_id in CATALOG_BY_ID or asset_id.startswith("F:"):
-            normalized_ids.append(asset_id)
-    if not normalized_ids:
-        return hints
-    with ThreadPoolExecutor(max_workers=min(6, len(normalized_ids))) as executor:
-        futures = {executor.submit(fund_start_hint, asset_id): asset_id for asset_id in normalized_ids}
-        for future in as_completed(futures):
-            asset_id = futures[future]
-            try:
-                hint_start = future.result()
-            except Exception:
-                hint_start = "不可用"
-            hints.append({"id": asset_id, "hintStart": hint_start or "不可用"})
-    return hints
-
-
-def asset_start_hint(asset_id):
-    asset_id = str(asset_id or "").strip()
-    if not asset_id:
-        return None
-    if asset_id in CATALOG_BY_ID:
-        meta = CATALOG_BY_ID[asset_id]
-        hint_start = meta.get("hintStart") or enrich_start(meta).get("hintStart")
-        return {**meta, "hintStart": hint_start or "不可用"}
-    if asset_id.startswith("F:"):
-        hint_start = fetch_fund_start_date(asset_id[2:])
-        meta = get_dynamic_fund_meta(asset_id) or {"id": asset_id}
-        return {**meta, "hintStart": hint_start or "不可用"}
-    if asset_id.startswith("Y:"):
-        meta = get_dynamic_yahoo_meta(asset_id)
-        return enrich_start(meta) if meta else None
-    return None
-
-
-def asset_start_hints(asset_ids):
-    hints = []
-    normalized_ids = []
-    seen = set()
-    for asset_id in asset_ids:
-        asset_id = str(asset_id or "").strip()
-        if not asset_id or asset_id in seen:
-            continue
-        seen.add(asset_id)
-        if asset_id in CATALOG_BY_ID or asset_id.startswith(("F:", "Y:")):
-            normalized_ids.append(asset_id)
-    if not normalized_ids:
-        return hints
-    with ThreadPoolExecutor(max_workers=min(6, len(normalized_ids))) as executor:
-        futures = {executor.submit(asset_start_hint, asset_id): asset_id for asset_id in normalized_ids}
-        for future in as_completed(futures):
-            asset_id = futures[future]
-            try:
-                hint = future.result()
-            except Exception:
-                hint = {"id": asset_id, "hintStart": "不可用"}
-            if hint:
-                hints.append(hint)
-    return hints
+    return CATALOG_BY_ID.get(code, {}).get("hintStart") or ""
 
 
 def fund_search(query, limit=12):
     key = query.lower().strip()
     if not key:
         return []
-    catalog = fund_catalog_if_ready()
-    if catalog is None:
-        if key.isdigit() and len(key) == 6:
-            return [
-                {
-                    "id": key if key in CATALOG_BY_ID else f"F:{key}",
-                    "symbol": key,
-                    "name": f"{key} 累计净值",
-                    "assetClass": "China Fund",
-                    "source": "fund_nav_accum",
-                    "currency": "CNY",
-                    "hintStart": dynamic_fund_hint_start(key),
-                    "keywords": key,
-                    "dynamic": key not in CATALOG_BY_ID,
-                }
-            ]
-        return []
+    catalog = fund_catalog()
     matched = []
     for row in catalog:
         haystack = f"{row['code']} {row['name']} {row['type']} {row['abbr']} {row['pinyin']}".lower()
@@ -700,19 +612,157 @@ def get_asset_meta(asset_id):
     return CATALOG_BY_ID.get(asset_id) or get_dynamic_yahoo_meta(asset_id) or get_dynamic_fund_meta(asset_id)
 
 
-def enrich_start(meta):
+def data_availability_reason(meta):
+    if meta.get("hintStart") == DATA_UNAVAILABLE_HINT:
+        return DATA_UNAVAILABLE_REASON
+    data_count = int(meta.get("dataCount") or 0)
+    if 0 < data_count < MIN_BACKTEST_DAYS:
+        return INSUFFICIENT_DATA_REASON
+    if meta.get("dataUnavailable"):
+        return DATA_UNAVAILABLE_REASON
+    return ""
+
+
+def enrich_asset_market_profile(meta, force=False):
+    meta = dict(meta)
+    if not force and meta.get("hintStart") and (not meta.get("dynamic") or "dataCount" in meta):
+        meta["disabledReason"] = data_availability_reason(meta)
+        return meta
     try:
-        rows = get_series(meta["id"])
-        meta = dict(meta)
-        meta["hintStart"] = rows[0]["date"] if rows else ""
-        meta["lastDate"] = rows[-1]["date"] if rows else ""
-        meta["dataCount"] = len(rows)
+        if meta.get("source") == "fund_nav_accum":
+            profile = fetch_fund_profile(meta["symbol"])
+            meta.update(profile)
+        else:
+            rows = get_series(meta["id"])
+            meta["hintStart"] = rows[0]["date"] if rows else DATA_UNAVAILABLE_HINT
+            meta["lastDate"] = rows[-1]["date"] if rows else ""
+            meta["dataCount"] = len(rows)
     except Exception:
-        meta = dict(meta)
-        meta["hintStart"] = "不可用"
+        meta["hintStart"] = DATA_UNAVAILABLE_HINT
+        meta["lastDate"] = ""
         meta["dataCount"] = 0
+        meta["dataUnavailable"] = True
+    meta["disabledReason"] = data_availability_reason(meta)
     return meta
 
+
+def public_asset_meta(meta):
+    return {
+        key: value
+        for key, value in meta.items()
+        if key not in {"keywords", "source", "dataUnavailable"}
+    }
+
+
+def local_search_items(query):
+    items = []
+    for item in CATALOG:
+        haystack = " ".join(
+            [
+                item["id"],
+                item["symbol"],
+                item["name"],
+                item["assetClass"],
+                item.get("keywords", ""),
+            ]
+        ).lower()
+        if not query or query in haystack:
+            items.append(dict(item))
+    return items
+
+
+def complete_search_items(items):
+    completed = [None] * len(items)
+    pending = []
+    for index, item in enumerate(items):
+        if item.get("dynamic"):
+            pending.append((index, item))
+        else:
+            completed[index] = enrich_asset_market_profile(item)
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(6, len(pending))) as executor:
+            futures = {
+                executor.submit(enrich_asset_market_profile, item): index
+                for index, item in pending
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    completed[index] = future.result()
+                except Exception:
+                    failed = dict(items[index])
+                    failed["hintStart"] = DATA_UNAVAILABLE_HINT
+                    failed["dataCount"] = 0
+                    failed["disabledReason"] = DATA_UNAVAILABLE_REASON
+                    completed[index] = failed
+    return [public_asset_meta(item) for item in completed if item]
+
+
+def search_assets(query):
+    started = time.time()
+    query = query.lower().strip()
+    log_event("search.start", query=query or "-", yahoo=should_search_yahoo(query), funds=should_search_funds(query))
+    items = local_search_items(query)
+    log_event("search.local", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
+
+    if query and should_search_yahoo(query):
+        existing = {item["id"] for item in items}
+        yahoo_started = time.time()
+        if not yahoo_search_available():
+            log_event(
+                "search.yahoo.skipped",
+                query=query,
+                reason="cooldown",
+                remaining_seconds=int(max(0, YAHOO_SEARCH_DISABLED_UNTIL - time.time())),
+            )
+            yahoo_items = yahoo_symbol_fallback_search(query)
+        else:
+            try:
+                yahoo_items = yahoo_search(query)
+                log_event(
+                    "search.yahoo.done",
+                    query=query,
+                    count=len(yahoo_items),
+                    elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                )
+            except Exception as exc:
+                record_yahoo_search_failure()
+                log_event(
+                    "search.yahoo.error",
+                    query=query,
+                    error=type(exc).__name__,
+                    cooldown_seconds=YAHOO_SEARCH_COOLDOWN_SECONDS,
+                    elapsed_ms=int((time.time() - yahoo_started) * 1000),
+                )
+                yahoo_items = yahoo_symbol_fallback_search(query)
+        append_search_items(items, existing, yahoo_items, 18)
+
+    if query and should_search_funds(query):
+        existing = {item["id"] for item in items}
+        fund_started = time.time()
+        try:
+            fund_items = fund_search(query)
+            log_event(
+                "search.fund.done",
+                query=query,
+                count=len(fund_items),
+                catalog_count=len(FUND_LIST_CACHE or []),
+                loading=FUND_LIST_LOADING,
+                elapsed_ms=int((time.time() - fund_started) * 1000),
+            )
+        except Exception as exc:
+            log_event(
+                "search.fund.error",
+                query=query,
+                error=type(exc).__name__,
+                elapsed_ms=int((time.time() - fund_started) * 1000),
+            )
+            fund_items = []
+        append_search_items(items, existing, fund_items, 24)
+
+    completed_items = complete_search_items(items)
+    log_event("search.done", query=query or "-", count=len(completed_items), elapsed_ms=int((time.time() - started) * 1000))
+    return completed_items
 
 def fetch_csindex(symbol):
     if ak is None:
@@ -1217,97 +1267,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             if parsed.path.startswith("/api/") and not require_api_key(self):
                 return
             if parsed.path == "/api/search":
-                started = time.time()
                 query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].lower().strip()
-                log_event("search.start", query=query or "-", yahoo=should_search_yahoo(query), funds=should_search_funds(query))
-                items = []
-                for item in CATALOG:
-                    haystack = " ".join(
-                        [
-                            item["id"],
-                            item["symbol"],
-                            item["name"],
-                            item["assetClass"],
-                            item.get("keywords", ""),
-                        ]
-                    ).lower()
-                    if not query or query in haystack:
-                        items.append({k: v for k, v in item.items() if k != "keywords"})
-                log_event("search.local", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
-                if query and should_search_yahoo(query):
-                    existing = {item["id"] for item in items}
-                    yahoo_started = time.time()
-                    if not yahoo_search_available():
-                        log_event(
-                            "search.yahoo.skipped",
-                            query=query,
-                            reason="cooldown",
-                            remaining_seconds=int(max(0, YAHOO_SEARCH_DISABLED_UNTIL - time.time())),
-                        )
-                        yahoo_items = yahoo_symbol_fallback_search(query)
-                    else:
-                        try:
-                            yahoo_items = yahoo_search(query)
-                            log_event(
-                                "search.yahoo.done",
-                                query=query,
-                                count=len(yahoo_items),
-                                elapsed_ms=int((time.time() - yahoo_started) * 1000),
-                            )
-                        except Exception as exc:
-                            record_yahoo_search_failure()
-                            log_event(
-                                "search.yahoo.error",
-                                query=query,
-                                error=type(exc).__name__,
-                                cooldown_seconds=YAHOO_SEARCH_COOLDOWN_SECONDS,
-                                elapsed_ms=int((time.time() - yahoo_started) * 1000),
-                            )
-                            yahoo_items = yahoo_symbol_fallback_search(query)
-                    if yahoo_items:
-                        append_search_items(items, existing, yahoo_items, 18)
-                if query and should_search_funds(query):
-                    existing = {item["id"] for item in items}
-                    fund_started = time.time()
-                    try:
-                        fund_ready = FUND_LIST_CACHE is not None
-                        fund_items = fund_search(query)
-                        log_event(
-                            "search.fund.done",
-                            query=query,
-                            count=len(fund_items),
-                            ready=fund_ready,
-                            loading=FUND_LIST_LOADING,
-                            elapsed_ms=int((time.time() - fund_started) * 1000),
-                        )
-                    except Exception as exc:
-                        log_event(
-                            "search.fund.error",
-                            query=query,
-                            error=type(exc).__name__,
-                            elapsed_ms=int((time.time() - fund_started) * 1000),
-                        )
-                        fund_items = []
-                    for item in fund_items:
-                        if item["id"] not in existing:
-                            items.append(item)
-                            existing.add(item["id"])
-                        if len(items) >= 24:
-                            break
-                log_event("search.done", query=query or "-", count=len(items), elapsed_ms=int((time.time() - started) * 1000))
-                json_response(
-                    self,
-                    {
-                        "items": [{k: v for k, v in item.items() if k != "keywords"} for item in items],
-                        "fundCatalog": fund_catalog_status(),
-                    },
-                )
+                json_response(self, {"items": search_assets(query)})
                 return
             if parsed.path == "/api/catalog":
-                json_response(self, {"items": [{k: v for k, v in item.items() if k != "keywords"} for item in CATALOG]})
-                return
-            if parsed.path == "/api/fund-catalog-status":
-                json_response(self, fund_catalog_status())
+                json_response(self, {"items": [public_asset_meta(enrich_asset_market_profile(item)) for item in CATALOG]})
                 return
             super().do_GET()
         except ValueError as exc:
@@ -1348,20 +1312,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                     payload.get("end") or None,
                 )
                 json_response(self, result)
-                return
-            if self.path == "/api/fund-start-hints":
-                asset_ids = payload.get("assetIds", [])
-                if not isinstance(asset_ids, list):
-                    json_response(self, {"error": "assetIds 必须是数组"}, 400)
-                    return
-                json_response(self, {"items": fund_start_hints(asset_ids)})
-                return
-            if self.path == "/api/asset-start-hints":
-                asset_ids = payload.get("assetIds", [])
-                if not isinstance(asset_ids, list):
-                    json_response(self, {"error": "assetIds 必须是数组"}, 400)
-                    return
-                json_response(self, {"items": asset_start_hints(asset_ids)})
                 return
             if self.path == "/api/optimize":
                 assets = payload.get("assets", [])
