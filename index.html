@@ -78,7 +78,10 @@
         <section class="panel">
           <div class="panel-title">
             <span data-i18n="optimize">参数优化</span>
-            <button id="optimizeBtn" type="button" class="ghost-btn" data-i18n="scan">扫描</button>
+            <div class="optimizer-title-actions">
+              <button id="compareAllBtn" type="button" class="ghost-btn" data-i18n="compareAll">全部对比</button>
+              <button id="optimizeBtn" type="button" class="ghost-btn" data-i18n="scan">扫描</button>
+            </div>
           </div>
           <div id="optimizerResults" class="optimizer-list"></div>
         </section>
@@ -113,7 +116,10 @@
               <button data-scale="log" type="button" data-i18n="logScale">指数</button>
             </div>
           </div>
-          <button id="resetZoomBtn" type="button" class="ghost-btn" data-i18n="resetRange">重置区间</button>
+          <div class="chart-action-group">
+            <button id="addCurrentCompareBtn" type="button" class="ghost-btn" data-i18n="newCompareItem">新增组合</button>
+            <button id="resetZoomBtn" type="button" class="ghost-btn" data-i18n="resetRange">重置区间</button>
+          </div>
         </div>
 
         <section class="chart-panel">
@@ -176,6 +182,50 @@
           <button id="shareApplyBtn" class="primary-btn" type="button" data-i18n="applyToView">应用到当前视图</button>
         </div>
       </section>
+    </div>
+    <div id="compareEditorOverlay" class="compare-editor-overlay" aria-hidden="true">
+      <form id="compareEditorForm" class="compare-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="compareEditorTitle">
+        <div class="compare-editor-head">
+          <div>
+            <h2 id="compareEditorTitle" data-i18n="compareEditorTitle">组合配置</h2>
+            <p id="compareEditorSubtitle" data-i18n="compareEditorHint">配置后会作为独立组合加入对比，不影响左侧当前参数。</p>
+          </div>
+          <button id="compareEditorCloseBtn" class="icon-btn" type="button" data-i18n-title="close" title="关闭">×</button>
+        </div>
+        <label class="compare-editor-name">
+          <span data-i18n="portfolioName">组合名称</span>
+          <input id="compareEditorNameInput" type="text" />
+        </label>
+        <div class="compare-editor-section">
+          <div class="compare-editor-section-head">
+            <span data-i18n="assets">标的</span>
+            <button id="compareEditorAddAssetBtn" class="ghost-btn" type="button" data-i18n="addAsset">添加标的</button>
+          </div>
+          <div id="compareEditorAssets" class="compare-editor-assets"></div>
+          <button id="compareEditorNormalizeBtn" class="ghost-btn" type="button" data-i18n="normalize">归一化</button>
+        </div>
+        <div class="compare-editor-grid">
+          <label>
+            <span data-i18n="rebalance">再平衡</span>
+            <select id="compareEditorRebalanceMode">
+              <option value="none" data-i18n="rebalanceNone">不再平衡</option>
+              <option value="monthly" data-i18n="rebalanceMonthly">每月</option>
+              <option value="quarterly" data-i18n="rebalanceQuarterly">每季</option>
+              <option value="annual" data-i18n="rebalanceAnnual">每年</option>
+              <option value="threshold" data-i18n="rebalanceThreshold">阈值</option>
+            </select>
+          </label>
+          <label>
+            <span data-i18n="threshold">阈值</span>
+            <input id="compareEditorThresholdInput" type="number" min="1" max="50" step="1" value="20" />
+          </label>
+        </div>
+        <div id="compareEditorError" class="compare-editor-error"></div>
+        <div class="compare-editor-actions">
+          <button id="compareEditorCancelBtn" class="ghost-btn" type="button" data-i18n="cancel">取消</button>
+          <button id="compareEditorSubmitBtn" class="primary-btn" type="submit" data-i18n="saveToCompare">保存到对比</button>
+        </div>
+      </form>
     </div>
     <script src="/app.js?v=20260616-seed"></script>
   </body>

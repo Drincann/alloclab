@@ -33,6 +33,8 @@ const state = {
     sortKey: "",
     sortDirection: "desc",
     pendingKey: "",
+    pendingAll: false,
+    editor: null,
   },
 };
 
@@ -62,7 +64,9 @@ const els = {
   corrMatrix: document.getElementById("corrMatrix"),
   rebalanceTable: document.getElementById("rebalanceTable"),
   optimizeBtn: document.getElementById("optimizeBtn"),
+  compareAllBtn: document.getElementById("compareAllBtn"),
   optimizerResults: document.getElementById("optimizerResults"),
+  addCurrentCompareBtn: document.getElementById("addCurrentCompareBtn"),
   resetZoomBtn: document.getElementById("resetZoomBtn"),
   comparisonPanel: document.getElementById("comparisonPanel"),
   chartScaleModes: document.getElementById("chartScaleModes"),
@@ -83,6 +87,18 @@ const els = {
   shareStatus: document.getElementById("shareStatus"),
   shareCreateBtn: document.getElementById("shareCreateBtn"),
   shareApplyBtn: document.getElementById("shareApplyBtn"),
+  compareEditorOverlay: document.getElementById("compareEditorOverlay"),
+  compareEditorForm: document.getElementById("compareEditorForm"),
+  compareEditorCloseBtn: document.getElementById("compareEditorCloseBtn"),
+  compareEditorCancelBtn: document.getElementById("compareEditorCancelBtn"),
+  compareEditorSubmitBtn: document.getElementById("compareEditorSubmitBtn"),
+  compareEditorNameInput: document.getElementById("compareEditorNameInput"),
+  compareEditorAssets: document.getElementById("compareEditorAssets"),
+  compareEditorAddAssetBtn: document.getElementById("compareEditorAddAssetBtn"),
+  compareEditorNormalizeBtn: document.getElementById("compareEditorNormalizeBtn"),
+  compareEditorRebalanceMode: document.getElementById("compareEditorRebalanceMode"),
+  compareEditorThresholdInput: document.getElementById("compareEditorThresholdInput"),
+  compareEditorError: document.getElementById("compareEditorError"),
   rangeLabel: document.getElementById("rangeLabel"),
   chartTitle: document.getElementById("chartTitle"),
 };
@@ -97,6 +113,25 @@ let debounceTimer = null;
 let searchDebounceTimer = null;
 let searchRequestSeq = 0;
 let searchAbortController = null;
+let comparisonDragEndedAt = 0;
+let comparisonPointerDrag = null;
+let comparisonDragRepaintFrame = null;
+let comparisonDropCleanupTimer = null;
+const overlayScrollbars = new Map();
+let overlayScrollbarFrame = null;
+
+const OVERLAY_SCROLL_SELECTORS = [
+  ".sidebar",
+  ".main-area",
+  ".share-dialog",
+  ".compare-editor-dialog",
+  ".search-results",
+  ".favorite-list",
+  ".optimizer-list",
+  ".comparison-table-wrap",
+  ".corr-matrix",
+  ".event-table",
+];
 
 const I18N = {
   zh: {
@@ -123,6 +158,7 @@ const I18N = {
     shareReady: "分享链接已生成",
     shareLink: "分享链接",
     copy: "复制",
+    copySuffix: "副本",
     copied: "已复制",
     close: "关闭",
     applyToView: "应用到当前视图",
@@ -178,6 +214,21 @@ const I18N = {
     add: "添加",
     remove: "移除",
     compare: "对比",
+    compareAll: "全部对比",
+    comparingAll: "加入中",
+    addCurrentCompare: "新增组合",
+    currentCompareDirty: "先运行",
+    newCompareItem: "新增组合",
+    copy: "复制",
+    edit: "编辑",
+    cancel: "取消",
+    saveToCompare: "保存到对比",
+    updateCompareItem: "更新组合",
+    compareEditorTitle: "组合配置",
+    compareEditorHint: "配置后会作为独立组合加入对比，不影响左侧当前参数。",
+    addAsset: "添加标的",
+    invalidCompareConfig: "请填写至少一个标的，并确保权重大于 0。",
+    customPortfolio: "自定义组合",
     comparing: "已加入",
     exitCompare: "退出对比",
     compareMode: "对比模式",
@@ -276,6 +327,7 @@ const I18N = {
     shareReady: "Share Link Ready",
     shareLink: "Share link",
     copy: "Copy",
+    copySuffix: "Copy",
     copied: "Copied",
     close: "Close",
     applyToView: "Apply to current view",
@@ -331,6 +383,21 @@ const I18N = {
     add: "Add",
     remove: "Remove",
     compare: "Compare",
+    compareAll: "Add all",
+    comparingAll: "Adding",
+    addCurrentCompare: "New portfolio",
+    currentCompareDirty: "Run first",
+    newCompareItem: "New portfolio",
+    copy: "Copy",
+    edit: "Edit",
+    cancel: "Cancel",
+    saveToCompare: "Save to compare",
+    updateCompareItem: "Update portfolio",
+    compareEditorTitle: "Portfolio config",
+    compareEditorHint: "This creates an independent comparison item without changing the left-side inputs.",
+    addAsset: "Add asset",
+    invalidCompareConfig: "Enter at least one asset and make sure total weight is above 0.",
+    customPortfolio: "Custom portfolio",
     comparing: "Added",
     exitCompare: "Exit Compare",
     compareMode: "Compare mode",
@@ -444,6 +511,120 @@ function restoreScrollState(snapshot) {
   };
   apply();
   requestAnimationFrame(apply);
+}
+
+function scheduleOverlayScrollbarUpdate() {
+  if (overlayScrollbarFrame) return;
+  overlayScrollbarFrame = requestAnimationFrame(() => {
+    overlayScrollbarFrame = null;
+    updateOverlayScrollbars();
+  });
+}
+
+function createOverlayThumb(axis, host) {
+  const thumb = document.createElement("div");
+  thumb.className = `overlay-scroll-thumb ${axis}`;
+  thumb.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    thumb.setPointerCapture(event.pointerId);
+    thumb.classList.add("dragging");
+    const startPointer = axis === "y" ? event.clientY : event.clientX;
+    const startScroll = axis === "y" ? host.scrollTop : host.scrollLeft;
+    const move = (moveEvent) => {
+      const rect = host.getBoundingClientRect();
+      const viewport = axis === "y" ? rect.height : rect.width;
+      const scrollSize = axis === "y" ? host.scrollHeight : host.scrollWidth;
+      const maxScroll = scrollSize - viewport;
+      if (maxScroll <= 0) return;
+      const thumbSize = Math.max(28, (viewport / scrollSize) * viewport);
+      const trackSize = Math.max(1, viewport - thumbSize);
+      const delta = (axis === "y" ? moveEvent.clientY : moveEvent.clientX) - startPointer;
+      const nextScroll = startScroll + (delta / trackSize) * maxScroll;
+      if (axis === "y") {
+        host.scrollTop = nextScroll;
+      } else {
+        host.scrollLeft = nextScroll;
+      }
+    };
+    const end = () => {
+      thumb.classList.remove("dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  });
+  document.body.appendChild(thumb);
+  return thumb;
+}
+
+function attachOverlayScrollbar(host) {
+  if (!host || overlayScrollbars.has(host)) return;
+  host.classList.add("overlay-scroll-host");
+  const entry = {
+    y: createOverlayThumb("y", host),
+    x: createOverlayThumb("x", host),
+    resizeObserver: new ResizeObserver(scheduleOverlayScrollbarUpdate),
+    mutationObserver: new MutationObserver(scheduleOverlayScrollbarUpdate),
+  };
+  entry.resizeObserver.observe(host);
+  entry.mutationObserver.observe(host, { childList: true, subtree: true });
+  host.addEventListener("scroll", scheduleOverlayScrollbarUpdate, { passive: true });
+  overlayScrollbars.set(host, entry);
+}
+
+function ensureOverlayScrollbars() {
+  OVERLAY_SCROLL_SELECTORS.forEach((selector) => {
+    document.querySelectorAll(selector).forEach(attachOverlayScrollbar);
+  });
+  overlayScrollbars.forEach((entry, host) => {
+    if (document.body.contains(host)) return;
+    entry.resizeObserver.disconnect();
+    entry.mutationObserver.disconnect();
+    entry.y.remove();
+    entry.x.remove();
+    overlayScrollbars.delete(host);
+  });
+  scheduleOverlayScrollbarUpdate();
+}
+
+function positionOverlayThumb(host, thumb, axis) {
+  const rect = host.getBoundingClientRect();
+  const viewport = axis === "y" ? rect.height : rect.width;
+  const scrollSize = axis === "y" ? host.scrollHeight : host.scrollWidth;
+  const maxScroll = scrollSize - viewport;
+  const visible =
+    maxScroll > 1 &&
+    rect.bottom > 0 &&
+    rect.right > 0 &&
+    rect.top < window.innerHeight &&
+    rect.left < window.innerWidth &&
+    getComputedStyle(host).visibility !== "hidden";
+  thumb.classList.toggle("visible", visible);
+  if (!visible) return;
+  const thumbSize = Math.max(28, (viewport / scrollSize) * viewport);
+  const trackSize = Math.max(1, viewport - thumbSize);
+  const offset = ((axis === "y" ? host.scrollTop : host.scrollLeft) / maxScroll) * trackSize;
+  if (axis === "y") {
+    thumb.style.left = `${Math.min(window.innerWidth - 8, rect.right - 8)}px`;
+    thumb.style.top = `${Math.max(4, rect.top + offset)}px`;
+    thumb.style.width = "6px";
+    thumb.style.height = `${Math.min(rect.height, thumbSize)}px`;
+  } else {
+    thumb.style.left = `${Math.max(4, rect.left + offset)}px`;
+    thumb.style.top = `${Math.min(window.innerHeight - 8, rect.bottom - 8)}px`;
+    thumb.style.width = `${Math.min(rect.width, thumbSize)}px`;
+    thumb.style.height = "6px";
+  }
+}
+
+function updateOverlayScrollbars() {
+  overlayScrollbars.forEach((entry, host) => {
+    positionOverlayThumb(host, entry.y, "y");
+    positionOverlayThumb(host, entry.x, "x");
+  });
 }
 
 function preserveScroll(action) {
@@ -675,22 +856,28 @@ function weightsTextFromFractions(weights) {
     .join(" / ");
 }
 
-function weightsTextFromPercents(assets) {
-  return assets
-    .map((asset) => `${asset.id} ${Math.round(Number(asset.weight || 0))}%`)
+function weightsTextFromConfig(assets, weights) {
+  return (assets || [])
+    .map((asset, i) => `${asset.id} ${Math.round(Number(weights?.[i] || asset.weight || 0) * 100)}%`)
     .join(" / ");
 }
 
-function comparisonKey(weights, rebalance) {
+function comparisonKeyForAssets(assets, weights, rebalance) {
+  const assetPart = (assets || []).map((asset) => String(asset.id || "").trim().toUpperCase()).join(",");
   const weightPart = weights.map((weight) => Number(weight || 0).toFixed(4)).join(",");
-  return `${weightPart}|${rebalance?.mode || "none"}|${Number(rebalance?.threshold || 0).toFixed(4)}`;
+  return `${assetPart}|${weightPart}|${rebalance?.mode || "none"}|${Number(rebalance?.threshold || 0).toFixed(4)}`;
+}
+
+function comparisonKey(weights, rebalance) {
+  return comparisonKeyForAssets(state.assets, weights, rebalance);
+}
+
+function currentWeightsAsFractions() {
+  return state.assets.map((asset) => Number(asset.weight || 0) / 100);
 }
 
 function currentComparisonKey() {
-  return comparisonKey(
-    state.assets.map((asset) => Number(asset.weight || 0) / 100),
-    state.rebalance,
-  );
+  return comparisonKey(currentWeightsAsFractions(), state.rebalance);
 }
 
 function profileComparisonKey(profile) {
@@ -702,16 +889,7 @@ function isComparisonMode() {
 }
 
 function comparisonEntries() {
-  if (!state.result) return [];
-  const current = {
-    key: currentComparisonKey(),
-    title: t("currentPortfolio"),
-    weightsText: weightsTextFromPercents(state.assets),
-    rebalance: state.rebalance,
-    result: state.result,
-    current: true,
-  };
-  return [current, ...sortedComparisonItems()];
+  return sortedComparisonItems();
 }
 
 function comparisonSortValue(entry, sortKey) {
@@ -741,6 +919,14 @@ function sortedComparisonItems() {
     }
     return ((av > bv ? 1 : 0) - (av < bv ? 1 : 0)) * direction;
   });
+}
+
+function comparisonDisplayTitle(entry, entries = comparisonEntries()) {
+  const title = entry.title || t("customPortfolio");
+  const sameTitleEntries = entries.filter((candidate) => (candidate.title || t("customPortfolio")) === title);
+  if (sameTitleEntries.length <= 1) return title;
+  const index = sameTitleEntries.findIndex((candidate) => candidate.key === entry.key);
+  return `${title} #${index + 1}`;
 }
 
 function comparisonSortIndicator(sortKey) {
@@ -1133,7 +1319,10 @@ function renderShareDialog() {
   els.shareApplyBtn.disabled = state.loading;
   els.shareOverlay.classList.add("active");
   els.shareOverlay.setAttribute("aria-hidden", "false");
-  requestAnimationFrame(() => drawShareCurve(portfolio));
+  requestAnimationFrame(() => {
+    drawShareCurve(portfolio);
+    ensureOverlayScrollbars();
+  });
 }
 
 function showShareDialog(portfolio, options = {}) {
@@ -1299,7 +1488,6 @@ function scheduleRun() {
 }
 
 function markBacktestDirty() {
-  clearComparisonForEdit();
   state.backtestDirty = true;
   updateInteractionLocks();
 }
@@ -1364,6 +1552,7 @@ function renderSearchItems(items, options = {}) {
   if (options.preserveScroll) {
     els.searchResults.scrollTop = previousScrollTop;
   }
+  ensureOverlayScrollbars();
 }
 
 async function loadCatalog() {
@@ -1697,8 +1886,10 @@ function updateInteractionLocks() {
   els.startInput.disabled = busy;
   els.endInput.disabled = busy;
   els.resetZoomBtn.disabled = busy || !state.result;
+  updateAddCurrentCompareButton();
   els.optimizeBtn.disabled = busy || state.optimizing;
   els.optimizeBtn.textContent = state.optimizing ? t("scanning") : t("scan");
+  refreshOptimizerCompareButtons();
   if (els.chartLoading) {
     els.chartLoading.textContent = t("backtesting");
     els.chartLoading.classList.toggle("active", busy);
@@ -1797,6 +1988,13 @@ async function runBacktest(resetView = true) {
 
 function renderAll() {
   if (!state.result) {
+    if (isComparisonMode() && comparisonEntries().length) {
+      renderChart();
+      renderLegend();
+      renderComparisonPanel();
+      ensureOverlayScrollbars();
+      return;
+    }
     if (state.backtestError) {
       drawChartMessage(
         state.backtestError.title,
@@ -1808,6 +2006,7 @@ function renderAll() {
     }
     clearChartLegend();
     renderComparisonPanel();
+    ensureOverlayScrollbars();
     return;
   }
   renderMetrics();
@@ -1816,6 +2015,7 @@ function renderAll() {
   renderChart();
   renderLegend();
   renderComparisonPanel();
+  ensureOverlayScrollbars();
 }
 
 function renderMetrics() {
@@ -1900,16 +2100,65 @@ function renderRebalanceTable() {
   els.rebalanceTable.innerHTML = html;
 }
 
-function comparisonPayload(profile) {
+function comparisonPayloadFromConfig(config) {
   return {
-    assets: state.assets.map((asset, i) => ({
+    assets: config.assets.map((asset, i) => ({
       id: asset.id,
-      weight: Number(profile.weights?.[i] || 0) * 100,
+      weight: Number(config.weights?.[i] || 0) * 100,
     })),
-    rebalance: profile.rebalance,
+    rebalance: config.rebalance,
     start: els.startInput.value || null,
     end: els.endInput.value || null,
   };
+}
+
+function comparisonConfigFromProfile(profile) {
+  return {
+    title: profileTitle(profile),
+    assets: state.assets.map((asset) => ({ id: asset.id })),
+    weights: [...(profile.weights || [])],
+    rebalance: { ...(profile.rebalance || {}) },
+  };
+}
+
+function currentComparisonConfig() {
+  const weights = currentWeightsAsFractions();
+  return {
+    title: t("customPortfolio"),
+    assets: state.assets.map((asset) => ({ id: asset.id })),
+    weights,
+    rebalance: { ...state.rebalance },
+  };
+}
+
+function comparisonConfigFromItem(item, title = item.title) {
+  return {
+    title,
+    assets: (item.assets || state.assets).map((asset) => ({ id: asset.id })),
+    weights: [...(item.weights || [])],
+    rebalance: { ...(item.rebalance || {}) },
+  };
+}
+
+function comparisonItemFromConfig(config, result) {
+  const assets = config.assets.map((asset) => ({ id: String(asset.id || "").trim().toUpperCase() }));
+  const weights = config.weights.map((weight) => Number(weight || 0));
+  return {
+    key: comparisonKeyForAssets(assets, weights, config.rebalance),
+    title: config.title || t("customPortfolio"),
+    assets,
+    weights,
+    weightsText: weightsTextFromConfig(assets, weights),
+    rebalance: { ...config.rebalance },
+    result,
+  };
+}
+
+async function fetchComparisonResult(config) {
+  return api("/api/backtest", {
+    method: "POST",
+    body: JSON.stringify(comparisonPayloadFromConfig(config)),
+  });
 }
 
 function enterComparisonMode() {
@@ -1937,6 +2186,8 @@ function exitComparisonMode() {
     sortKey: "",
     sortDirection: "desc",
     pendingKey: "",
+    pendingAll: false,
+    editor: null,
   };
   if (els.comparisonPanel) {
     els.comparisonPanel.hidden = true;
@@ -1964,6 +2215,8 @@ function clearComparisonForEdit() {
     sortKey: "",
     sortDirection: "desc",
     pendingKey: "",
+    pendingAll: false,
+    editor: null,
   };
   if (els.comparisonPanel) {
     els.comparisonPanel.hidden = true;
@@ -1976,11 +2229,11 @@ function clearComparisonForEdit() {
 }
 
 async function addProfileToComparison(profile) {
-  if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey) return;
+  if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey || state.comparison.pendingAll) return;
   enterComparisonMode();
-  const key = profileComparisonKey(profile);
-  const currentKey = currentComparisonKey();
-  if (key === currentKey || state.comparison.items.some((item) => item.key === key)) {
+  const config = comparisonConfigFromProfile(profile);
+  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+  if (state.comparison.items.some((item) => item.key === key)) {
     renderComparisonPanel();
     renderOptimizer(state.optimizerProfiles);
     return;
@@ -1988,18 +2241,8 @@ async function addProfileToComparison(profile) {
   state.comparison.pendingKey = key;
   refreshOptimizerCompareButtons();
   try {
-    const result = await api("/api/backtest", {
-      method: "POST",
-      body: JSON.stringify(comparisonPayload(profile)),
-    });
-    state.comparison.items.push({
-      key,
-      title: profileTitle(profile),
-      weights: profile.weights,
-      weightsText: weightsTextFromFractions(profile.weights || []),
-      rebalance: profile.rebalance,
-      result,
-    });
+    const result = await fetchComparisonResult(config);
+    state.comparison.items.push(comparisonItemFromConfig(config, result));
     renderAll();
   } catch (error) {
     renderComparisonPanel(error.message || t("requestFailed"));
@@ -2009,12 +2252,205 @@ async function addProfileToComparison(profile) {
   }
 }
 
-async function applyWeightsAndRebalance(weights, rebalance) {
+async function addAllProfilesToComparison() {
+  if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey || state.comparison.pendingAll) return;
+  const existingKeys = new Set(state.comparison.items.map((item) => item.key));
+  const profiles = state.optimizerProfiles.filter((profile) => !existingKeys.has(profileComparisonKey(profile)));
+  if (!profiles.length) return;
+  enterComparisonMode();
+  state.comparison.pendingAll = true;
+  refreshOptimizerCompareButtons();
+  let errorMessage = "";
+  try {
+    for (const profile of profiles) {
+      const config = comparisonConfigFromProfile(profile);
+      const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+      if (state.comparison.items.some((item) => item.key === key)) continue;
+      const result = await fetchComparisonResult(config);
+      state.comparison.items.push(comparisonItemFromConfig(config, result));
+      renderAll();
+    }
+  } catch (error) {
+    errorMessage = error.message || t("requestFailed");
+  } finally {
+    state.comparison.pendingAll = false;
+    renderAll();
+    renderOptimizer(state.optimizerProfiles);
+    if (errorMessage) renderComparisonPanel(errorMessage);
+  }
+}
+
+function openComparisonEditor(mode = "new", config = currentComparisonConfig(), key = "") {
+  if (!els.compareEditorOverlay) return;
+  state.comparison.editor = {
+    mode,
+    key,
+    config: {
+      title: config.title || t("customPortfolio"),
+      assets: (config.assets || []).map((asset) => ({ id: String(asset.id || "").trim().toUpperCase() })),
+      weights: [...(config.weights || [])],
+      rebalance: { ...(config.rebalance || { mode: "none", threshold: 0.1 }) },
+    },
+  };
+  renderComparisonEditor();
+  els.compareEditorOverlay.classList.add("active");
+  els.compareEditorOverlay.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    els.compareEditorNameInput?.focus();
+    ensureOverlayScrollbars();
+  });
+}
+
+function closeComparisonEditor() {
+  state.comparison.editor = null;
+  if (!els.compareEditorOverlay) return;
+  els.compareEditorOverlay.classList.remove("active");
+  els.compareEditorOverlay.setAttribute("aria-hidden", "true");
+  if (els.compareEditorError) els.compareEditorError.textContent = "";
+}
+
+function renderComparisonEditor() {
+  const editor = state.comparison.editor;
+  if (!editor || !els.compareEditorAssets) return;
+  const config = editor.config;
+  els.compareEditorNameInput.value = config.title || "";
+  els.compareEditorRebalanceMode.value = config.rebalance?.mode || "none";
+  els.compareEditorThresholdInput.value = Math.round(Number(config.rebalance?.threshold || 0.1) * 100);
+  els.compareEditorSubmitBtn.textContent = editor.mode === "edit" ? t("updateCompareItem") : t("saveToCompare");
+  els.compareEditorError.textContent = "";
+  els.compareEditorAssets.innerHTML = config.assets
+    .map(
+      (asset, index) => `
+        <div class="compare-editor-asset-row" data-index="${index}">
+          <input data-field="id" value="${escapeHtml(asset.id || "")}" placeholder="QQQ" />
+          <input data-field="weight" type="number" min="0" max="100" step="0.1" value="${escapeHtml(String(Math.round(Number(config.weights[index] || 0) * 1000) / 10))}" />
+          <span>%</span>
+          <button class="icon-btn" type="button" data-action="remove-editor-asset" title="${escapeHtml(t("remove"))}">×</button>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function syncComparisonEditorFromInputs() {
+  const editor = state.comparison.editor;
+  if (!editor) return null;
+  const rows = Array.from(els.compareEditorAssets.querySelectorAll(".compare-editor-asset-row"));
+  const assets = [];
+  const weights = [];
+  rows.forEach((row) => {
+    const id = row.querySelector('[data-field="id"]')?.value.trim().toUpperCase();
+    const weight = Number(row.querySelector('[data-field="weight"]')?.value || 0) / 100;
+    if (!id && weight <= 0) return;
+    assets.push({ id });
+    weights.push(weight);
+  });
+  editor.config = {
+    title: els.compareEditorNameInput.value.trim() || t("customPortfolio"),
+    assets,
+    weights,
+    rebalance: {
+      mode: els.compareEditorRebalanceMode.value || "none",
+      threshold: Number(els.compareEditorThresholdInput.value || 10) / 100,
+    },
+  };
+  return editor.config;
+}
+
+function normalizeComparisonEditorWeights() {
+  const config = syncComparisonEditorFromInputs();
+  if (!config) return;
+  const total = config.weights.reduce((sum, weight) => sum + Number(weight || 0), 0);
+  if (total <= 0) return;
+  config.weights = config.weights.map((weight) => Number(weight || 0) / total);
+  state.comparison.editor.config = config;
+  renderComparisonEditor();
+}
+
+function addComparisonEditorAsset() {
+  const config = syncComparisonEditorFromInputs() || currentComparisonConfig();
+  config.assets.push({ id: "" });
+  config.weights.push(0);
+  state.comparison.editor.config = config;
+  renderComparisonEditor();
+}
+
+function removeComparisonEditorAsset(index) {
+  const config = syncComparisonEditorFromInputs();
+  if (!config || config.assets.length <= 1) return;
+  config.assets.splice(index, 1);
+  config.weights.splice(index, 1);
+  state.comparison.editor.config = config;
+  renderComparisonEditor();
+}
+
+function validateComparisonConfig(config) {
+  const total = config.weights.reduce((sum, weight) => sum + Number(weight || 0), 0);
+  return config.assets.length > 0 && config.assets.every((asset) => asset.id) && total > 0;
+}
+
+async function submitComparisonEditor() {
+  const editor = state.comparison.editor;
+  const config = syncComparisonEditorFromInputs();
+  if (!editor || !config) return;
+  if (!validateComparisonConfig(config)) {
+    els.compareEditorError.textContent = t("invalidCompareConfig");
+    return;
+  }
+  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+  const duplicate = state.comparison.items.some((item) => item.key === key && item.key !== editor.key);
+  if (duplicate) {
+    els.compareEditorError.textContent = t("comparing");
+    return;
+  }
+  state.comparison.pendingKey = key;
+  els.compareEditorSubmitBtn.disabled = true;
+  try {
+    const result = await fetchComparisonResult(config);
+    const item = comparisonItemFromConfig(config, result);
+    enterComparisonMode();
+    if (editor.mode === "edit") {
+      state.comparison.items = state.comparison.items.map((candidate) => (candidate.key === editor.key ? item : candidate));
+      state.comparison.hiddenKeys = state.comparison.hiddenKeys.map((hiddenKey) => (hiddenKey === editor.key ? item.key : hiddenKey));
+      if (state.comparison.highlightedKey === editor.key) state.comparison.highlightedKey = item.key;
+    } else {
+      state.comparison.items.push(item);
+    }
+    closeComparisonEditor();
+    renderAll();
+    renderOptimizer(state.optimizerProfiles);
+  } catch (error) {
+    els.compareEditorError.textContent = error.message || t("requestFailed");
+  } finally {
+    state.comparison.pendingKey = "";
+    els.compareEditorSubmitBtn.disabled = false;
+    refreshOptimizerCompareButtons();
+  }
+}
+
+function addCurrentToComparison() {
+  openComparisonEditor("new", currentComparisonConfig());
+}
+
+function copyComparisonItem(key) {
+  const item = state.comparison.items.find((candidate) => candidate.key === key);
+  if (!item) return;
+  openComparisonEditor("copy", comparisonConfigFromItem(item, `${item.title} ${t("copySuffix")}`));
+}
+
+function editComparisonItem(key) {
+  const item = state.comparison.items.find((candidate) => candidate.key === key);
+  if (!item) return;
+  openComparisonEditor("edit", comparisonConfigFromItem(item), key);
+}
+
+async function applyWeightsAndRebalance(weights, rebalance, assets = state.assets) {
   if (state.loading || state.optimizing) return;
   const scrollSnapshot = captureScrollState();
-  weights.forEach((weight, i) => {
-    state.assets[i].weight = weight * 100;
-  });
+  state.assets = assets.map((asset, i) => ({
+    id: asset.id,
+    weight: Number(weights[i] || 0) * 100,
+  }));
   state.rebalance = {
     mode: rebalance.mode,
     threshold: rebalance.threshold,
@@ -2026,10 +2462,6 @@ async function applyWeightsAndRebalance(weights, rebalance) {
   saveState();
   await runBacktest(true);
   if (isComparisonMode()) {
-    const key = currentComparisonKey();
-    state.comparison.items = state.comparison.items.filter((item) => item.key !== key);
-    state.comparison.hiddenKeys = state.comparison.hiddenKeys.filter((hiddenKey) => hiddenKey !== key);
-    if (state.comparison.highlightedKey === key) state.comparison.highlightedKey = "";
     renderAll();
     renderOptimizer(state.optimizerProfiles);
   }
@@ -2048,8 +2480,230 @@ function removeComparisonItem(key) {
   renderOptimizer(state.optimizerProfiles);
 }
 
+function captureComparisonRowRects() {
+  const rects = new Map();
+  els.comparisonPanel?.querySelectorAll("tr[data-compare-key]").forEach((row) => {
+    rects.set(row.dataset.compareKey, row.getBoundingClientRect());
+  });
+  return rects;
+}
+
+function animateComparisonReorder(previousRects, movedKey) {
+  requestAnimationFrame(() => {
+    els.comparisonPanel?.querySelectorAll("tr[data-compare-key]").forEach((row) => {
+      const previous = previousRects.get(row.dataset.compareKey);
+      if (!previous) return;
+      const current = row.getBoundingClientRect();
+      const deltaY = previous.top - current.top;
+      if (Math.abs(deltaY) > 1) {
+        row.animate(
+          [
+            { transform: `translateY(${deltaY}px)` },
+            { transform: "translateY(0)" },
+          ],
+          { duration: 240, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+        );
+      }
+      if (row.dataset.compareKey === movedKey) {
+        row.classList.add("moved-row");
+        window.setTimeout(() => row.classList.remove("moved-row"), 520);
+      }
+    });
+  });
+}
+
+function moveComparisonItem(dragKey, targetKey, placeAfter = false, options = {}) {
+  if (!dragKey || !targetKey || dragKey === targetKey) return false;
+  const previousRects = captureComparisonRowRects();
+  const items = [...state.comparison.items];
+  const fromIndex = items.findIndex((item) => item.key === dragKey);
+  const targetIndex = items.findIndex((item) => item.key === targetKey);
+  if (fromIndex < 0 || targetIndex < 0) return false;
+  const [moved] = items.splice(fromIndex, 1);
+  const adjustedTargetIndex = items.findIndex((item) => item.key === targetKey);
+  const insertIndex = adjustedTargetIndex + (placeAfter ? 1 : 0);
+  if (items[insertIndex]?.key === dragKey || (fromIndex === insertIndex || fromIndex === insertIndex - 1)) return false;
+  items.splice(insertIndex, 0, moved);
+  state.comparison.items = items;
+  state.comparison.sortKey = "";
+  if (options.render !== false) {
+    renderAll();
+    animateComparisonReorder(previousRects, dragKey);
+  }
+  return true;
+}
+
+function moveComparisonItemToIndex(dragKey, insertIndex, options = {}) {
+  if (!dragKey) return false;
+  const previousRects = captureComparisonRowRects();
+  const items = [...state.comparison.items];
+  const fromIndex = items.findIndex((item) => item.key === dragKey);
+  if (fromIndex < 0) return false;
+  const [moved] = items.splice(fromIndex, 1);
+  const boundedIndex = Math.max(0, Math.min(insertIndex, items.length));
+  if (fromIndex === boundedIndex) return false;
+  items.splice(boundedIndex, 0, moved);
+  state.comparison.items = items;
+  state.comparison.sortKey = "";
+  if (options.render !== false) {
+    renderAll();
+    animateComparisonReorder(previousRects, dragKey);
+  }
+  return true;
+}
+
+function syncComparisonItemsFromTableOrder(tbody) {
+  if (!tbody) return false;
+  const orderedKeys = Array.from(tbody.querySelectorAll("tr[data-compare-key]")).map((row) => row.dataset.compareKey);
+  const itemsByKey = new Map(state.comparison.items.map((item) => [item.key, item]));
+  const orderedItems = orderedKeys.map((key) => itemsByKey.get(key)).filter(Boolean);
+  if (orderedItems.length !== state.comparison.items.length) return false;
+  const changed = orderedItems.some((item, index) => item.key !== state.comparison.items[index]?.key);
+  if (!changed) return false;
+  state.comparison.items = orderedItems;
+  state.comparison.sortKey = "";
+  return true;
+}
+
+function scheduleComparisonDragRepaint() {
+  if (comparisonDragRepaintFrame) return;
+  comparisonDragRepaintFrame = requestAnimationFrame(() => {
+    comparisonDragRepaintFrame = null;
+    renderChart();
+    renderLegend();
+  });
+}
+
+function updateComparisonDragGhost(event) {
+  if (!comparisonPointerDrag?.ghost) return;
+  const x = event.clientX - comparisonPointerDrag.offsetX;
+  const y = event.clientY - comparisonPointerDrag.offsetY;
+  comparisonPointerDrag.ghost.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+}
+
+function cleanupComparisonDragArtifacts() {
+  if (comparisonDropCleanupTimer) {
+    window.clearTimeout(comparisonDropCleanupTimer);
+    comparisonDropCleanupTimer = null;
+  }
+  document.querySelectorAll(".drag-ghost-row").forEach((ghost) => ghost.remove());
+  els.comparisonPanel?.querySelectorAll(".drag-source-row").forEach((row) => row.classList.remove("drag-source-row"));
+}
+
+function startComparisonPointerDrag(row, event) {
+  if (event.button !== 0 || event.target.closest("button")) return;
+  const key = row.dataset.compareKey || "";
+  if (!key) return;
+  event.preventDefault();
+  cleanupComparisonDragArtifacts();
+  const rect = row.getBoundingClientRect();
+  comparisonPointerDrag = {
+    key,
+    pointerId: event.pointerId,
+    sourceRow: row,
+    ghost: null,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    startX: event.clientX,
+    startY: event.clientY,
+    rect,
+    active: false,
+  };
+  document.addEventListener("pointermove", updateComparisonPointerDrag, true);
+  document.addEventListener("pointerup", endComparisonPointerDrag, true);
+  document.addEventListener("pointercancel", endComparisonPointerDrag, true);
+}
+
+function activateComparisonPointerDrag(event) {
+  if (!comparisonPointerDrag || comparisonPointerDrag.active) return;
+  const ghost = comparisonPointerDrag.sourceRow.cloneNode(true);
+  ghost.classList.add("drag-ghost-row");
+  const sourceCells = Array.from(comparisonPointerDrag.sourceRow.children);
+  Array.from(ghost.children).forEach((cell, index) => {
+    const sourceCell = sourceCells[index];
+    if (!sourceCell) return;
+    cell.style.width = `${sourceCell.getBoundingClientRect().width}px`;
+  });
+  ghost.style.width = `${comparisonPointerDrag.rect.width}px`;
+  ghost.style.height = `${comparisonPointerDrag.rect.height}px`;
+  ghost.style.left = "0";
+  ghost.style.top = "0";
+  ghost.style.transform = `translate3d(${comparisonPointerDrag.rect.left}px, ${comparisonPointerDrag.rect.top}px, 0)`;
+  document.body.appendChild(ghost);
+  comparisonPointerDrag.sourceRow.classList.add("drag-source-row");
+  comparisonPointerDrag.ghost = ghost;
+  comparisonPointerDrag.active = true;
+  updateComparisonDragGhost(event);
+}
+
+function updateComparisonPointerDrag(event) {
+  if (!comparisonPointerDrag || event.pointerId !== comparisonPointerDrag.pointerId) return;
+  event.preventDefault();
+  if (!comparisonPointerDrag.active) {
+    const dx = event.clientX - comparisonPointerDrag.startX;
+    const dy = event.clientY - comparisonPointerDrag.startY;
+    if (Math.hypot(dx, dy) < 4) return;
+    activateComparisonPointerDrag(event);
+  }
+  updateComparisonDragGhost(event);
+  const tbody = comparisonPointerDrag.sourceRow.closest("tbody");
+  if (!tbody) return;
+  const rows = Array.from(tbody.querySelectorAll("tr[data-compare-key]")).filter(
+    (row) => row.dataset.compareKey !== comparisonPointerDrag.key,
+  );
+  const hoveredRow = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("tr[data-compare-key]");
+  let referenceRow = null;
+  if (hoveredRow && hoveredRow !== comparisonPointerDrag.sourceRow && tbody.contains(hoveredRow)) {
+    const rect = hoveredRow.getBoundingClientRect();
+    referenceRow = event.clientY < rect.top + rect.height / 2 ? hoveredRow : hoveredRow.nextElementSibling;
+  } else {
+    const tableRect = tbody.getBoundingClientRect();
+    if (event.clientY < tableRect.top) {
+      referenceRow = rows[0] || null;
+    } else if (event.clientY > tableRect.bottom) {
+      referenceRow = null;
+    } else {
+      referenceRow = rows.find((row) => event.clientY < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2) || null;
+    }
+  }
+  if (referenceRow === comparisonPointerDrag.sourceRow.nextElementSibling) return;
+  const previousRects = captureComparisonRowRects();
+  if (referenceRow) {
+    tbody.insertBefore(comparisonPointerDrag.sourceRow, referenceRow);
+  } else {
+    tbody.appendChild(comparisonPointerDrag.sourceRow);
+  }
+  const moved = syncComparisonItemsFromTableOrder(tbody);
+  if (!moved) return;
+  animateComparisonReorder(previousRects, comparisonPointerDrag.key);
+  scheduleComparisonDragRepaint();
+}
+
+function endComparisonPointerDrag(event) {
+  if (!comparisonPointerDrag || event.pointerId !== comparisonPointerDrag.pointerId) return;
+  if (comparisonPointerDrag.active) comparisonDragEndedAt = Date.now();
+  const dragState = comparisonPointerDrag;
+  comparisonPointerDrag = null;
+  document.removeEventListener("pointermove", updateComparisonPointerDrag, true);
+  document.removeEventListener("pointerup", endComparisonPointerDrag, true);
+  document.removeEventListener("pointercancel", endComparisonPointerDrag, true);
+  if (dragState.active && dragState.ghost && dragState.sourceRow) {
+    const rect = dragState.sourceRow.getBoundingClientRect();
+    dragState.ghost.classList.add("dropping");
+    dragState.ghost.style.transform = `translate3d(${rect.left}px, ${rect.top}px, 0)`;
+    comparisonDropCleanupTimer = window.setTimeout(() => {
+      comparisonDropCleanupTimer = null;
+      cleanupComparisonDragArtifacts();
+      renderAll();
+    }, 170);
+    return;
+  }
+  cleanupComparisonDragArtifacts();
+  renderAll();
+}
+
 function renderComparisonPanel(message = "") {
-  if (!els.comparisonPanel || !isComparisonMode() || !state.result) {
+  if (!els.comparisonPanel || !isComparisonMode()) {
     if (els.comparisonPanel) els.comparisonPanel.hidden = true;
     return;
   }
@@ -2058,14 +2712,16 @@ function renderComparisonPanel(message = "") {
   const rows = entries
     .map((entry) => {
       const metrics = entry.result.metrics || {};
-      const action = entry.current
-        ? `<span class="comparison-current-mark">${escapeHtml(t("currentPortfolio"))}</span>`
-        : `<button type="button" data-action="apply" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("apply"))}</button>
-           <button type="button" data-action="remove" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("remove"))}</button>`;
       const hidden = isComparisonHidden(entry.key);
+      const rowClasses = hidden ? "muted-item" : "";
+      const displayTitle = comparisonDisplayTitle(entry, entries);
+      const action = `<button type="button" data-action="apply" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("apply"))}</button>
+           <button type="button" data-action="copy" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("copy"))}</button>
+           <button type="button" data-action="edit" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("edit"))}</button>
+           <button type="button" data-action="remove" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("remove"))}</button>`;
       return `
-        <tr data-compare-key="${escapeHtml(entry.key)}" class="${hidden ? "muted-item" : ""}">
-          <td><strong>${escapeHtml(entry.title)}</strong><span>${escapeHtml(entry.weightsText)}</span></td>
+        <tr data-compare-key="${escapeHtml(entry.key)}" class="${rowClasses}">
+          <td><strong><i class="comparison-drag-handle" aria-hidden="true">⋮⋮</i>${escapeHtml(displayTitle)}</strong><span>${escapeHtml(entry.weightsText)}</span></td>
           <td>${escapeHtml(rebalanceLabel(entry.rebalance))}</td>
           <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
           <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
@@ -2082,7 +2738,10 @@ function renderComparisonPanel(message = "") {
         <strong>${escapeHtml(t("compareTableTitle"))}</strong>
         ${message ? `<span class="error">${escapeHtml(message)}</span>` : `<span>${escapeHtml(t("compareMode"))}</span>`}
       </div>
-      <button class="ghost-btn comparison-exit-btn" type="button" data-action="exit-compare">${escapeHtml(t("exitCompare"))}</button>
+      <div class="comparison-head-actions">
+        <button class="ghost-btn" type="button" data-action="new-compare">${escapeHtml(t("newCompareItem"))}</button>
+        <button class="ghost-btn comparison-exit-btn" type="button" data-action="exit-compare">${escapeHtml(t("exitCompare"))}</button>
+      </div>
     </div>
     <div class="comparison-table-wrap">
       <table class="comparison-table">
@@ -2105,27 +2764,40 @@ function renderComparisonPanel(message = "") {
     button.addEventListener("click", () => setComparisonSort(button.dataset.sort));
   });
   els.comparisonPanel.querySelector('button[data-action="exit-compare"]')?.addEventListener("click", exitComparisonMode);
+  els.comparisonPanel.querySelector('button[data-action="new-compare"]')?.addEventListener("click", () => {
+    openComparisonEditor("new", currentComparisonConfig());
+  });
   els.comparisonPanel.querySelectorAll("button[data-action]").forEach((button) => {
-    if (button.dataset.action === "exit-compare") return;
+    if (button.dataset.action === "exit-compare" || button.dataset.action === "new-compare") return;
     button.disabled = state.loading || state.optimizing;
     button.addEventListener("click", () => {
       const item = state.comparison.items.find((candidate) => candidate.key === button.dataset.key);
       if (!item) return;
       if (button.dataset.action === "remove") {
         removeComparisonItem(item.key);
+      } else if (button.dataset.action === "copy") {
+        copyComparisonItem(item.key);
+      } else if (button.dataset.action === "edit") {
+        editComparisonItem(item.key);
       } else {
-        applyWeightsAndRebalance(item.weights, item.rebalance);
+        applyWeightsAndRebalance(item.weights, item.rebalance, item.assets);
       }
     });
   });
   els.comparisonPanel.querySelectorAll("tr[data-compare-key]").forEach((row) => {
     row.addEventListener("pointerenter", () => setComparisonHighlight(row.dataset.compareKey));
     row.addEventListener("pointerleave", () => setComparisonHighlight(""));
+    row.addEventListener("pointerdown", (event) => startComparisonPointerDrag(row, event));
+    row.addEventListener("click", (event) => {
+      if (Date.now() - comparisonDragEndedAt < 250) return;
+      if (event.target.closest("button")) return;
+      editComparisonItem(row.dataset.compareKey);
+    });
   });
 }
 
 function renderLegend() {
-  if (!state.result) return;
+  if (!state.result && !comparisonEntries().length) return;
   let legend = document.getElementById("chartLegend");
   if (!legend) {
     legend = document.createElement("div");
@@ -2135,7 +2807,7 @@ function renderLegend() {
     legend.addEventListener("click", (event) => {
       const item = event.target.closest("button[data-series]");
       const compareItem = event.target.closest("button[data-compare-key]");
-      if (compareItem && state.result && isComparisonMode()) {
+      if (compareItem && isComparisonMode()) {
         const key = compareItem.dataset.compareKey;
         if (!isComparisonHidden(key) && visibleComparisonEntries().length <= 1) return;
         setComparisonHidden(key, !isComparisonHidden(key));
@@ -2181,8 +2853,12 @@ function renderLegend() {
             (entry, idx) => {
               const hidden = isComparisonHidden(entry.key);
               const highlighted = state.comparison.highlightedKey === entry.key;
-              return `<button type="button" data-compare-key="${escapeHtml(entry.key)}" class="${hidden ? "muted-item" : ""} ${highlighted ? "highlighted-item" : ""}">
-                <i style="background:${idx === 0 ? "var(--accent-2)" : palette[(idx + 1) % palette.length]}"></i>${escapeHtml(entry.title)}
+              const displayTitle = comparisonDisplayTitle(entry, entries);
+              const classes = [hidden ? "muted-item" : "", highlighted ? "highlighted-item" : "", entry.current ? "current-item" : ""]
+                .filter(Boolean)
+                .join(" ");
+              return `<button type="button" data-compare-key="${escapeHtml(entry.key)}" class="${classes}">
+                <i style="background:${idx === 0 ? "var(--accent-2)" : palette[(idx + 1) % palette.length]}"></i>${escapeHtml(displayTitle)}
               </button>`;
             },
           )
@@ -2226,15 +2902,22 @@ function canvasGeometry() {
   return { canvas, rect, dpr, width, height };
 }
 
+function chartResultForView() {
+  if (isComparisonMode()) {
+    return comparisonEntries()[0]?.result || state.result;
+  }
+  return state.result;
+}
+
 function getViewData() {
-  const result = state.result;
+  const result = chartResultForView();
   const start = Math.max(0, state.view?.start ?? 0);
   const end = Math.min(result.dates.length - 1, state.view?.end ?? result.dates.length - 1);
   return { start, end };
 }
 
 function renderChart() {
-  if (!state.result) return;
+  if (!state.result && !comparisonEntries().length) return;
   const { canvas, dpr, width, height } = canvasGeometry();
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, width, height);
@@ -2261,6 +2944,7 @@ function renderChart() {
   const compareMode = isComparisonMode();
   const allCompareEntries = compareMode ? comparisonEntries() : [];
   const compareEntries = compareMode ? visibleComparisonEntries() : [];
+  const viewResult = compareMode && compareEntries[0] ? compareEntries[0].result : state.result;
   const drawdownHeight = compareMode ? 0 : 80;
   const drawdownBottomMargin = 20;
   const drawdownTop = cssHeight - drawdownBottomMargin - drawdownHeight;
@@ -2268,18 +2952,18 @@ function renderChart() {
   const plotW = cssWidth - pad.left - pad.right;
   const plotH = cssHeight - pad.top - pad.bottom;
   const { start, end } = getViewData();
-  const nav = state.result.nav.slice(start, end + 1);
-  const drawdowns = state.result.drawdowns.slice(start, end + 1);
-  const dates = state.result.dates.slice(start, end + 1);
-  const full = state.result.metrics;
+  const nav = viewResult.nav.slice(start, end + 1);
+  const drawdowns = viewResult.drawdowns.slice(start, end + 1);
+  const dates = viewResult.dates.slice(start, end + 1);
+  const full = viewResult.metrics;
   els.rangeLabel.textContent = compareMode
-    ? `${t("compareMode")} · ${t("currentView")} ${state.result.dates[start]} ${t("to")} ${state.result.dates[end]}`
-    : `${t("currentView")} ${state.result.dates[start]} ${t("to")} ${state.result.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
-  const assetSeries = state.result.assetSeries.map((series) => series.slice(start, end + 1));
+    ? `${t("compareMode")} · ${t("currentView")} ${viewResult.dates[start]} ${t("to")} ${viewResult.dates[end]}`
+    : `${t("currentView")} ${viewResult.dates[start]} ${t("to")} ${viewResult.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
+  const assetSeries = compareMode ? [] : state.result.assetSeries.map((series) => series.slice(start, end + 1));
   const portfolioVisible = state.visibleSeries.portfolio !== false;
-  const visibleAssetSeries = assetSeries.filter(
-    (_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false,
-  );
+  const visibleAssetSeries = compareMode
+    ? []
+    : assetSeries.filter((_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false);
   const compareSeries = compareEntries.map((entry) => entry.result.nav.slice(start, end + 1));
   const allValues = [
     ...(compareMode ? compareSeries.flat() : portfolioVisible ? nav : []),
@@ -2533,7 +3217,7 @@ function pointToIndex(clientX) {
 }
 
 function showTooltip(event) {
-  if (!state.result || state.selection) return;
+  if ((!state.result && !comparisonEntries().length) || state.selection) return;
   const canvasRect = els.canvas.getBoundingClientRect();
   const insideCanvas =
     event.clientX >= canvasRect.left &&
@@ -2546,15 +3230,17 @@ function showTooltip(event) {
   }
   const idx = pointToIndex(event.clientX);
   state.hoverIndex = idx;
-  const date = state.result.dates[idx];
-  const nav = state.result.nav[idx];
-  const dd = state.result.drawdowns[idx];
-  const weights = state.result.weightsTimeline[idx] || [];
+  const viewResult = chartResultForView();
+  const date = viewResult.dates[idx];
+  const nav = viewResult.nav[idx];
+  const dd = viewResult.drawdowns[idx];
+  const weights = state.result?.weightsTimeline[idx] || [];
   if (isComparisonMode()) {
+    const entries = visibleComparisonEntries();
     els.tooltip.innerHTML = `
       <strong>${date}</strong><br>
-      ${visibleComparisonEntries()
-        .map((entry) => `${escapeHtml(entry.title)} ${fmtNum(entry.result.nav[idx], 3)}`)
+      ${entries
+        .map((entry) => `${escapeHtml(comparisonDisplayTitle(entry))} ${fmtNum(entry.result.nav[idx], 3)}`)
         .join("<br>")}
     `;
   } else {
@@ -2605,7 +3291,9 @@ async function optimize() {
   const scrollSnapshot = captureScrollState();
   state.optimizing = true;
   updateInteractionLocks();
-  els.optimizerResults.innerHTML = `<div class="status">${t("scanning")}</div>`;
+  if (!state.optimizerProfiles.length) {
+    els.optimizerResults.innerHTML = `<div class="status">${t("scanning")}</div>`;
+  }
   restoreScrollState(scrollSnapshot);
   try {
     const data = await api("/api/optimize", {
@@ -2628,9 +3316,11 @@ function renderOptimizer(profiles) {
   state.optimizerProfiles = profiles || [];
   if (!profiles.length) {
     els.optimizerResults.innerHTML = `<div class="status">${t("noResults")}</div>`;
+    refreshOptimizerCompareButtons();
     return;
   }
   els.optimizerResults.innerHTML = "";
+  refreshOptimizerCompareButtons();
   for (const profile of profiles) {
     const card = document.createElement("div");
     card.className = "optimizer-card";
@@ -2639,8 +3329,7 @@ function renderOptimizer(profiles) {
     const rule =
       rebalanceLabel(profile.rebalance);
     const compareKey = profileComparisonKey(profile);
-    const alreadyComparing =
-      isComparisonMode() && (compareKey === currentComparisonKey() || state.comparison.items.some((item) => item.key === compareKey));
+    const alreadyComparing = isComparisonMode() && state.comparison.items.some((item) => item.key === compareKey);
     card.innerHTML = `
       <div class="opt-head">
         <strong>${profileTitle(profile)}</strong>
@@ -2665,25 +3354,42 @@ function renderOptimizer(profiles) {
     compareButton.disabled = state.loading || state.optimizing || alreadyComparing;
     compareButton.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
     applyButton.addEventListener("click", () => {
-      applyWeightsAndRebalance(profile.weights, profile.rebalance);
+      applyWeightsAndRebalance(profile.weights, profile.rebalance, state.assets);
     });
     compareButton.addEventListener("click", () => {
       addProfileToComparison(profile);
     });
     els.optimizerResults.appendChild(card);
   }
+  ensureOverlayScrollbars();
 }
 
 function refreshOptimizerCompareButtons() {
   els.optimizerResults.querySelectorAll('button[data-action="compare"]').forEach((button) => {
     const key = button.dataset.compareKey || "";
-    const alreadyComparing =
-      isComparisonMode() && (key === currentComparisonKey() || state.comparison.items.some((item) => item.key === key));
+    const alreadyComparing = isComparisonMode() && state.comparison.items.some((item) => item.key === key);
     const pending = state.comparison.pendingKey === key;
     button.textContent = pending ? t("backtesting") : alreadyComparing ? t("comparing") : t("compare");
-    button.disabled = state.loading || state.optimizing || alreadyComparing || Boolean(state.comparison.pendingKey);
+    button.disabled =
+      state.loading || state.optimizing || alreadyComparing || Boolean(state.comparison.pendingKey) || state.comparison.pendingAll;
     button.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
   });
+  const addAllButton = els.compareAllBtn;
+  if (addAllButton) {
+    const allAdded =
+      state.optimizerProfiles.length > 0 &&
+      state.optimizerProfiles.every((profile) => state.comparison.items.some((item) => item.key === profileComparisonKey(profile)));
+    addAllButton.textContent = state.comparison.pendingAll ? t("comparingAll") : t("compareAll");
+    addAllButton.disabled =
+      state.loading || state.optimizing || state.comparison.pendingAll || Boolean(state.comparison.pendingKey) || allAdded;
+  }
+}
+
+function updateAddCurrentCompareButton() {
+  if (!els.addCurrentCompareBtn) return;
+  const busy = state.loading || state.optimizing || Boolean(state.comparison.pendingKey) || state.comparison.pendingAll;
+  els.addCurrentCompareBtn.textContent = t("newCompareItem");
+  els.addCurrentCompareBtn.disabled = busy;
 }
 
 function bindEvents() {
@@ -2731,6 +3437,30 @@ function bindEvents() {
     if (!state.shareDialog || state.shareDialog.mode !== "received") return;
     applyPortfolioSnapshot(state.shareDialog.portfolio);
   });
+  els.compareEditorForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitComparisonEditor();
+  });
+  els.compareEditorCloseBtn.addEventListener("click", closeComparisonEditor);
+  els.compareEditorCancelBtn.addEventListener("click", closeComparisonEditor);
+  els.compareEditorOverlay.addEventListener("click", (event) => {
+    if (event.target === els.compareEditorOverlay) closeComparisonEditor();
+  });
+  els.compareEditorAddAssetBtn.addEventListener("click", addComparisonEditorAsset);
+  els.compareEditorNormalizeBtn.addEventListener("click", normalizeComparisonEditorWeights);
+  els.compareEditorAssets.addEventListener("click", (event) => {
+    const button = event.target.closest('button[data-action="remove-editor-asset"]');
+    if (!button) return;
+    const row = button.closest(".compare-editor-asset-row");
+    removeComparisonEditorAsset(Number(row?.dataset.index || 0));
+  });
+  els.compareEditorAssets.addEventListener("input", syncComparisonEditorFromInputs);
+  els.compareEditorNameInput.addEventListener("input", syncComparisonEditorFromInputs);
+  els.compareEditorRebalanceMode.addEventListener("change", syncComparisonEditorFromInputs);
+  els.compareEditorThresholdInput.addEventListener("input", syncComparisonEditorFromInputs);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.comparison.editor) closeComparisonEditor();
+  });
   els.favoriteNameInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") saveFavorite();
   });
@@ -2749,12 +3479,10 @@ function bindEvents() {
     scheduleRun();
   });
   els.startInput.addEventListener("change", () => {
-    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
   els.endInput.addEventListener("change", () => {
-    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
@@ -2793,16 +3521,29 @@ function bindEvents() {
     }
   });
   els.optimizeBtn.addEventListener("click", optimize);
+  els.compareAllBtn.addEventListener("click", addAllProfilesToComparison);
+  els.addCurrentCompareBtn.addEventListener("click", addCurrentToComparison);
   els.resetZoomBtn.addEventListener("click", () => {
     if (!state.result || state.loading) return;
+    if (isComparisonMode()) {
+      const viewResult = chartResultForView();
+      state.view = { start: 0, end: viewResult.dates.length - 1 };
+      renderChart();
+      renderLegend();
+      renderComparisonPanel();
+      return;
+    }
     els.startInput.value = "";
     els.endInput.value = "";
     state.view = { start: 0, end: state.result.dates.length - 1 };
-    clearComparisonForEdit();
     saveState();
     runBacktest(true);
   });
-  window.addEventListener("resize", renderChart);
+  window.addEventListener("resize", () => {
+    renderChart();
+    scheduleOverlayScrollbarUpdate();
+  });
+  window.addEventListener("scroll", scheduleOverlayScrollbarUpdate, { passive: true });
   watchSystemTheme();
 
   els.canvas.addEventListener("mousedown", (event) => {
@@ -2831,6 +3572,13 @@ function bindEvents() {
       const a = pointToIndex(rect.left + startX);
       const b = pointToIndex(rect.left + endX);
       if (b - a > 10) {
+        if (isComparisonMode()) {
+          state.view = { start: a, end: b };
+          renderChart();
+          renderLegend();
+          renderComparisonPanel();
+          return;
+        }
         els.startInput.value = state.result.dates[a];
         els.endInput.value = state.result.dates[b];
         state.view = null;
