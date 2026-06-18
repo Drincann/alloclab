@@ -1414,28 +1414,96 @@ def generate_weight_grid(n, step=0.1, min_weight=0.0):
     return out
 
 
-def optimize_portfolio(asset_ids, start=None, end=None):
+def clamp_number(value, default, low, high):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(low, min(high, number))
+
+
+def normalize_ratio_option(value, default, low=0.0, high=1.0):
+    number = clamp_number(value, default, low, 100.0)
+    if number > 1:
+        number = number / 100
+    return max(low, min(high, number))
+
+
+def clean_optimize_options(raw_options, asset_count):
+    raw_options = raw_options if isinstance(raw_options, dict) else {}
+    auto_step = 0.05 if asset_count == 2 else 0.10
+    allowed_steps = [0.025, 0.05, 0.10, 0.20]
+    requested_step = raw_options.get("step", "auto")
+    if requested_step == "auto":
+        step = auto_step
+    else:
+        parsed_step = clamp_number(requested_step, auto_step, min(allowed_steps), max(allowed_steps))
+        step = min(allowed_steps, key=lambda item: abs(item - parsed_step))
+
+    min_weight = normalize_ratio_option(raw_options.get("minWeight"), 0.0, 0.0, 0.40)
+    if min_weight * asset_count >= 1:
+        min_weight = max(0.0, (1 / asset_count) - step)
+    max_weight = normalize_ratio_option(raw_options.get("maxWeight"), 0.85, 0.05, 1.0)
+    max_weight = max(max_weight, 1 / asset_count, min_weight)
+
+    raw_drawdown = raw_options.get("maxDrawdown")
+    max_drawdown = None
+    if raw_drawdown not in (None, ""):
+        max_drawdown = normalize_ratio_option(raw_drawdown, 0.0, 0.01, 0.95)
+
+    result_limit = int(clamp_number(raw_options.get("limit"), 24, 8, 60))
+    raw_modes = raw_options.get("rebalanceModes")
+    if isinstance(raw_modes, list):
+        rebalance_modes = sorted(
+            {
+                str(mode)
+                for mode in raw_modes
+                if str(mode) in {"none", "monthly", "quarterly", "annual", "threshold"}
+            }
+        )
+    else:
+        rebalance_modes = ["annual", "none", "quarterly", "threshold"]
+    if not rebalance_modes:
+        rebalance_modes = ["annual", "none", "quarterly", "threshold"]
+
+    return {
+        "step": step,
+        "minWeight": min_weight,
+        "maxWeight": max_weight,
+        "maxDrawdown": max_drawdown,
+        "limit": result_limit,
+        "rebalanceModes": rebalance_modes,
+    }
+
+
+def optimize_portfolio(asset_ids, start=None, end=None, options=None):
     n = len(asset_ids)
     if n < 2:
         raise ValueError("至少选择两个标的才能优化。")
-    cache_key = (tuple(asset_ids), start or "", end or "")
+    options = clean_optimize_options(options, n)
+    cache_key = (tuple(asset_ids), start or "", end or "", json.dumps(options, sort_keys=True, separators=(",", ":")))
     if cache_key in OPTIMIZE_CACHE:
         return OPTIMIZE_CACHE[cache_key]
     series_list = [get_series(asset_id) for asset_id in asset_ids]
     dates, prices = align_series(series_list, start, end)
-    step = 0.05 if n == 2 else 0.10
-    grids = generate_weight_grid(n, step=step, min_weight=0.0)
-    grids = [weights for weights in grids if all(weight <= 0.85 for weight in weights)]
-    rules = [
-        {"mode": "none", "threshold": 0.10, "label": "不再平衡"},
-        {"mode": "annual", "threshold": 0.10, "label": "每年"},
-        {"mode": "quarterly", "threshold": 0.10, "label": "每季"},
-        {"mode": "threshold", "threshold": 0.08, "label": "8% 阈值"},
-        {"mode": "threshold", "threshold": 0.10, "label": "10% 阈值"},
-        {"mode": "threshold", "threshold": 0.15, "label": "15% 阈值"},
-        {"mode": "threshold", "threshold": 0.20, "label": "20% 阈值"},
+    step = options["step"]
+    grids = generate_weight_grid(n, step=step, min_weight=options["minWeight"])
+    grids = [weights for weights in grids if all(weight <= options["maxWeight"] for weight in weights)]
+    all_rules = [
+        {"mode": "none", "threshold": 0.10, "label": "不再平衡", "family": "none"},
+        {"mode": "monthly", "threshold": 0.10, "label": "每月", "family": "monthly"},
+        {"mode": "annual", "threshold": 0.10, "label": "每年", "family": "annual"},
+        {"mode": "quarterly", "threshold": 0.10, "label": "每季", "family": "quarterly"},
+        {"mode": "threshold", "threshold": 0.08, "label": "8% 阈值", "family": "threshold"},
+        {"mode": "threshold", "threshold": 0.10, "label": "10% 阈值", "family": "threshold"},
+        {"mode": "threshold", "threshold": 0.15, "label": "15% 阈值", "family": "threshold"},
+        {"mode": "threshold", "threshold": 0.20, "label": "20% 阈值", "family": "threshold"},
     ]
+    rules = [rule for rule in all_rules if rule["family"] in options["rebalanceModes"]]
     candidates = []
+    evaluated_count = 0
     for weights in grids:
         if sum(1 for weight in weights if weight > 0) < 2:
             continue
@@ -1446,10 +1514,15 @@ def optimize_portfolio(asset_ids, start=None, end=None):
                 )
             except ValueError:
                 continue
+            evaluated_count += 1
+            if options["maxDrawdown"] is not None and metrics["maxDrawdown"] < -options["maxDrawdown"]:
+                continue
+            rule_payload = {key: value for key, value in rule.items() if key != "family"}
             candidates.append(
                 {
                     "weights": weights,
-                    "rebalance": rule,
+                    "assets": [{"id": asset_id} for asset_id in asset_ids],
+                    "rebalance": rule_payload,
                     "metrics": metrics,
                     "score": {
                         "sharpe0": metrics["sharpe0"] or -999,
@@ -1461,6 +1534,102 @@ def optimize_portfolio(asset_ids, start=None, end=None):
                     },
                 }
             )
+
+    def metric_values(name):
+        return [candidate["score"][name] for candidate in candidates]
+
+    def normalize(value, values, inverse=False):
+        if not values:
+            return 0
+        lo = min(values)
+        hi = max(values)
+        if hi == lo:
+            return 0.5
+        score = (value - lo) / (hi - lo)
+        return 1 - score if inverse else score
+
+    if not candidates:
+        result = {
+            "profiles": [],
+            "summary": {
+                "scanned": evaluated_count,
+                "eligible": 0,
+                "retained": 0,
+                "step": step,
+                "minWeight": options["minWeight"],
+                "maxWeight": options["maxWeight"],
+                "maxDrawdown": options["maxDrawdown"],
+                "limit": options["limit"],
+            },
+        }
+        OPTIMIZE_CACHE[cache_key] = result
+        return result
+
+    cagr_values = metric_values("cagr")
+    mdd_values = metric_values("mdd")
+    vol_values = metric_values("vol")
+    avg_nav_values = metric_values("averageNav")
+    for candidate in candidates:
+        score = candidate["score"]
+        score["composite"] = (
+            normalize(score["cagr"], cagr_values) * 0.35
+            + normalize(score["mdd"], mdd_values) * 0.25
+            + normalize(score["averageNav"], avg_nav_values) * 0.25
+            + normalize(score["vol"], vol_values, inverse=True) * 0.15
+        )
+
+    def percentile(values, ratio):
+        ordered = sorted(values)
+        if not ordered:
+            return 0
+        idx = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * ratio)))
+        return ordered[idx]
+
+    cagr_p75 = percentile(cagr_values, 0.75)
+    cagr_p90 = percentile(cagr_values, 0.90)
+    mdd_p75 = percentile(mdd_values, 0.75)
+    avg_nav_p75 = percentile(avg_nav_values, 0.75)
+    vol_p25 = percentile(vol_values, 0.25)
+
+    def profile_tags(candidate):
+        score = candidate["score"]
+        tags = []
+        if score["cagr"] >= cagr_p90:
+            tags.append("高年化")
+        elif score["cagr"] >= cagr_p75:
+            tags.append("收益靠前")
+        if score["mdd"] >= mdd_p75:
+            tags.append("低回撤")
+        if score["averageNav"] >= avg_nav_p75:
+            tags.append("高平均净值")
+        if score["vol"] <= vol_p25:
+            tags.append("低波动")
+        if candidate["metrics"].get("rebalanceCount", 0) <= 2:
+            tags.append("少再平衡")
+        max_weight = max(candidate["weights"]) if candidate["weights"] else 0
+        if max_weight >= 0.75:
+            tags.append("高集中度")
+        elif max_weight <= 0.45:
+            tags.append("更分散")
+        return tags[:4]
+
+    def profile_reason(candidate):
+        tags = profile_tags(candidate)
+        score = candidate["score"]
+        if "高年化" in tags:
+            return f"年化 {score['cagr'] * 100:.1f}% 位于候选前列，适合作为收益上限参考。"
+        if "低回撤" in tags and "高平均净值" in tags:
+            return "回撤和平均净值同时靠前，适合作为均衡候选优先比较。"
+        if "低回撤" in tags:
+            return f"最大回撤 {score['mdd'] * 100:.1f}%，在候选中更稳健。"
+        if "高平均净值" in tags:
+            return "平均净值靠前，说明多数时间处在较高净值水平。"
+        if "低波动" in tags:
+            return "波动率处在候选低位，适合作为保守对照。"
+        return "在收益、回撤和平均净值之间较均衡，适合作为对照候选。"
+
+    def weight_distance(a, b):
+        return sum(abs(a[i] - b[i]) for i in range(min(len(a), len(b))))
 
     selected = []
 
@@ -1475,6 +1644,21 @@ def optimize_portfolio(asset_ids, start=None, end=None):
                 continue
             selected.append({"key": key, "kind": kind, "title": title, **row})
             return
+
+    def add_many(kind, title, rows, limit):
+        added = 0
+        for row in rows:
+            key = (
+                tuple(round(w, 4) for w in row["weights"]),
+                row["rebalance"]["mode"],
+                round(row["rebalance"].get("threshold", 0), 4),
+            )
+            if any(item["key"] == key for item in selected):
+                continue
+            selected.append({"key": key, "kind": kind, "title": title, **row})
+            added += 1
+            if added >= limit:
+                return
 
     add_profile(
         "sharpe",
@@ -1511,10 +1695,52 @@ def optimize_portfolio(asset_ids, start=None, end=None):
             key=lambda c: (c["score"]["vol"], -c["score"]["cagr"]),
         ),
     )
+    add_many(
+        "balanced",
+        "综合候选",
+        sorted(candidates, key=lambda c: (c["score"]["composite"], c["score"]["cagr"]), reverse=True),
+        max(4, options["limit"] // 3),
+    )
+    add_many(
+        "diverse",
+        "差异候选",
+        sorted(
+            candidates,
+            key=lambda c: min((weight_distance(c["weights"], s["weights"]) for s in selected), default=0),
+            reverse=True,
+        ),
+        max(4, options["limit"] // 4),
+    )
+    add_many(
+        "balanced",
+        "综合候选",
+        sorted(candidates, key=lambda c: (c["score"]["composite"], c["score"]["cagr"]), reverse=True),
+        options["limit"],
+    )
 
-    for item in selected:
+    for index, item in enumerate(selected, start=1):
         item.pop("key", None)
-    result = selected[:8]
+        item["rank"] = index
+        item["tags"] = profile_tags(item)
+        item["rankReason"] = profile_reason(item)
+        item["score"]["composite"] = item["score"].get("composite", 0)
+    result_profiles = selected[: options["limit"]]
+    summary = {
+        "scanned": evaluated_count,
+        "eligible": len(candidates),
+        "retained": len(result_profiles),
+        "step": step,
+        "minWeight": options["minWeight"],
+        "maxWeight": options["maxWeight"],
+        "maxDrawdown": options["maxDrawdown"],
+        "limit": options["limit"],
+        "rebalanceModes": options["rebalanceModes"],
+        "cagrRange": [min(cagr_values), max(cagr_values)],
+        "drawdownRange": [min(mdd_values), max(mdd_values)],
+        "averageNavRange": [min(avg_nav_values), max(avg_nav_values)],
+        "volatilityRange": [min(vol_values), max(vol_values)],
+    }
+    result = {"profiles": result_profiles, "summary": summary}
     OPTIMIZE_CACHE[cache_key] = result
     return result
 
@@ -1859,8 +2085,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                     asset_ids,
                     payload.get("start") or None,
                     payload.get("end") or None,
+                    payload.get("optimize") or {},
                 )
-                json_response(self, {"profiles": result})
+                json_response(self, result)
                 return
             if self.path == "/api/share":
                 portfolio = clean_share_portfolio(payload.get("portfolio") or payload)

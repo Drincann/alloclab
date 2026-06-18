@@ -12,8 +12,17 @@ const state = {
   loading: false,
   pendingBacktestResetView: null,
   backtestDirty: false,
+  analysisDetailsCollapsed: false,
   optimizing: false,
   optimizerProfiles: [],
+  optimizerSummary: null,
+  optimizerCollapsed: false,
+  optimizerSelectedKeys: [],
+  optimizerFocusedKey: "",
+  optimizerSortKey: "composite",
+  optimizerSortDirection: "desc",
+  optimizerTagFilter: "",
+  optimizerMapView: null,
   favorites: [],
   extraCatalog: [],
   chartScale: "linear",
@@ -60,11 +69,18 @@ const els = {
   canvas: document.getElementById("equityCanvas"),
   tooltip: document.getElementById("tooltip"),
   chartLoading: document.getElementById("chartLoading"),
+  analysisDetails: document.getElementById("analysisDetails"),
+  analysisToggleBtn: document.getElementById("analysisToggleBtn"),
+  analysisToggleText: document.getElementById("analysisToggleText"),
   metricsGrid: document.getElementById("metricsGrid"),
   corrMatrix: document.getElementById("corrMatrix"),
   rebalanceTable: document.getElementById("rebalanceTable"),
   optimizeBtn: document.getElementById("optimizeBtn"),
   compareAllBtn: document.getElementById("compareAllBtn"),
+  optimizerStepInput: document.getElementById("optimizerStepInput"),
+  optimizerMaxWeightInput: document.getElementById("optimizerMaxWeightInput"),
+  optimizerMaxDrawdownInput: document.getElementById("optimizerMaxDrawdownInput"),
+  optimizerLimitInput: document.getElementById("optimizerLimitInput"),
   optimizerResults: document.getElementById("optimizerResults"),
   addCurrentCompareBtn: document.getElementById("addCurrentCompareBtn"),
   resetZoomBtn: document.getElementById("resetZoomBtn"),
@@ -119,6 +135,8 @@ let comparisonDragRepaintFrame = null;
 let comparisonDropCleanupTimer = null;
 const overlayScrollbars = new Map();
 let overlayScrollbarFrame = null;
+let optimizerMapRedraw = null;
+let optimizerMapResizeObserver = null;
 
 const OVERLAY_SCROLL_SELECTORS = [
   ".sidebar",
@@ -128,6 +146,8 @@ const OVERLAY_SCROLL_SELECTORS = [
   ".search-results",
   ".favorite-list",
   ".optimizer-list",
+  ".optimizer-side-scroll",
+  ".optimizer-table-wrap",
   ".comparison-table-wrap",
   ".corr-matrix",
   ".event-table",
@@ -167,6 +187,7 @@ const I18N = {
     sharedPortfolio: "分享组合",
     portfolioName: "组合名称",
     portfolioWeights: "组合比例",
+    weights: "权重",
     shareDraftHint: "确认展示效果后生成链接",
     shareCreatedHint: "复制链接后发给别人",
     createShareFailed: "生成分享链接失败",
@@ -186,6 +207,35 @@ const I18N = {
     optimize: "参数优化",
     scan: "扫描",
     scanning: "扫描中",
+    auto: "自动",
+    unlimited: "不限",
+    optimizerStep: "步长",
+    maxWeight: "最大权重",
+    maxDrawdownLimit: "回撤上限",
+    resultCount: "返回数量",
+    scanSummary: "扫描摘要",
+    featuredCandidates: "重点候选",
+    allCandidates: "全部候选",
+    scannedCandidates: "已扫描",
+    eligibleCandidates: "符合条件",
+    retainedCandidates: "保留",
+    gridStep: "步长",
+    candidateMap: "候选分布",
+    candidateMapIntro: "每个点是一个扫描出的组合，位置用于快速判断收益和回撤的取舍。",
+    candidateMapAxisHint: "越靠上年化收益越高，越靠左最大回撤越小；左上角通常更值得优先看。",
+    candidateMapSizeHint: "点越大代表平均净值越高，说明回测期内整体净值水平更占优。",
+    candidateMapColorHint: "深色点是重点候选，强调色点是已选组合，外圈表示当前聚焦的组合。",
+    candidateMapInteractionHint: "滚轮缩放，拖动平移，点击点会定位到下方候选列表。",
+    scanFilters: "筛选",
+    allTags: "全部标签",
+    selectedCandidates: "已选",
+    visibleCandidates: "可见",
+    addSelected: "加入",
+    addToCompare: "加入",
+    selectCandidate: "选择候选",
+    selectVisible: "全选",
+    resetMap: "重置",
+    compositeShort: "综合",
     equityCurve: "净值曲线",
     chartUnavailableTitle: "行情数据不可用",
     marketDataIssueTitle: "服务端行情源不可用",
@@ -235,6 +285,14 @@ const I18N = {
     currentPortfolio: "当前组合",
     compareTableTitle: "组合对比",
     noFavorites: "暂无收藏",
+    analysisDetails: "回测详情",
+    analysisCollapsedHint: "指标、相关性和再平衡记录",
+    expandDetails: "展开详情",
+    collapseDetails: "折叠详情",
+    scanResults: "扫描结果",
+    scanResultsHint: "候选分布、重点候选和全部候选列表",
+    expandScanResults: "展开结果",
+    collapseScanResults: "折叠结果",
     apply: "应用",
     delete: "删除",
     noRecords: "暂无记录",
@@ -298,6 +356,8 @@ const I18N = {
     profileCalmar: "回撤效率最佳",
     profileReturn: "年化收益最高",
     profileAverageNav: "平均净值最高",
+    profileBalanced: "综合候选",
+    profileDiverse: "差异候选",
     profileMdd20: "最大回撤不超过 20% 的最高年化",
     profileMdd30: "最大回撤不超过 30% 的最高年化",
     profileMdd40: "最大回撤不超过 40% 的最高年化",
@@ -336,6 +396,7 @@ const I18N = {
     sharedPortfolio: "Shared portfolio",
     portfolioName: "Portfolio name",
     portfolioWeights: "Weights",
+    weights: "Weights",
     shareDraftHint: "Review the presentation, then create a link",
     shareCreatedHint: "Copy the link and send it",
     createShareFailed: "Failed to create share link",
@@ -355,6 +416,35 @@ const I18N = {
     optimize: "Optimize",
     scan: "Scan",
     scanning: "Scanning",
+    auto: "Auto",
+    unlimited: "Any",
+    optimizerStep: "Step",
+    maxWeight: "Max weight",
+    maxDrawdownLimit: "Max drawdown",
+    resultCount: "Result count",
+    scanSummary: "Scan summary",
+    featuredCandidates: "Featured",
+    allCandidates: "All candidates",
+    scannedCandidates: "Scanned",
+    eligibleCandidates: "Eligible",
+    retainedCandidates: "Kept",
+    gridStep: "Step",
+    candidateMap: "Candidate map",
+    candidateMapIntro: "Each point is one scanned portfolio. Its position shows the return and drawdown tradeoff.",
+    candidateMapAxisHint: "Higher means stronger CAGR; further left means lower max drawdown. The upper-left area is usually worth checking first.",
+    candidateMapSizeHint: "Larger points have higher average NAV, meaning the portfolio stayed at a stronger level across the test window.",
+    candidateMapColorHint: "Darker points are featured candidates, accent points are selected portfolios, and the ring marks the focused portfolio.",
+    candidateMapInteractionHint: "Use the mouse wheel to zoom, drag to pan, and click a point to locate it in the candidate table.",
+    scanFilters: "Filters",
+    allTags: "All tags",
+    selectedCandidates: "Selected",
+    visibleCandidates: "Visible",
+    addSelected: "Add",
+    addToCompare: "Add",
+    selectCandidate: "Select candidate",
+    selectVisible: "Select all",
+    resetMap: "Reset",
+    compositeShort: "Score",
     equityCurve: "Equity Curve",
     chartUnavailableTitle: "Market Data Unavailable",
     marketDataIssueTitle: "Server market data source unavailable",
@@ -404,6 +494,14 @@ const I18N = {
     currentPortfolio: "Current portfolio",
     compareTableTitle: "Portfolio comparison",
     noFavorites: "No saved portfolios",
+    analysisDetails: "Backtest details",
+    analysisCollapsedHint: "Metrics, correlation, and rebalance records",
+    expandDetails: "Expand details",
+    collapseDetails: "Collapse details",
+    scanResults: "Scan results",
+    scanResultsHint: "Candidate map, featured candidates, and full candidate table",
+    expandScanResults: "Expand results",
+    collapseScanResults: "Collapse results",
     apply: "Apply",
     delete: "Delete",
     noRecords: "No records",
@@ -467,6 +565,8 @@ const I18N = {
     profileCalmar: "Best drawdown efficiency",
     profileReturn: "Highest CAGR",
     profileAverageNav: "Highest avg NAV",
+    profileBalanced: "Balanced candidate",
+    profileDiverse: "Diverse candidate",
     profileMdd20: "Highest CAGR with max drawdown <= 20%",
     profileMdd30: "Highest CAGR with max drawdown <= 30%",
     profileMdd40: "Highest CAGR with max drawdown <= 40%",
@@ -592,10 +692,12 @@ function ensureOverlayScrollbars() {
 
 function positionOverlayThumb(host, thumb, axis) {
   const rect = host.getBoundingClientRect();
+  const collapsedModule = host.closest(".collapsible-module.collapsed");
   const viewport = axis === "y" ? rect.height : rect.width;
   const scrollSize = axis === "y" ? host.scrollHeight : host.scrollWidth;
   const maxScroll = scrollSize - viewport;
   const visible =
+    !collapsedModule &&
     maxScroll > 1 &&
     rect.bottom > 0 &&
     rect.right > 0 &&
@@ -737,6 +839,7 @@ function rerenderLocalizedContent() {
   if (state.optimizerProfiles.length) {
     renderOptimizer(state.optimizerProfiles);
   }
+  renderAnalysisDetails();
   if (state.result) {
     renderAll();
   } else if (state.bootstrapped) {
@@ -881,7 +984,7 @@ function currentComparisonKey() {
 }
 
 function profileComparisonKey(profile) {
-  return comparisonKey(profile.weights || [], profile.rebalance || {});
+  return comparisonKeyForAssets(profile.assets || state.assets, profile.weights || [], profile.rebalance || {});
 }
 
 function isComparisonMode() {
@@ -983,6 +1086,8 @@ function profileTitle(profile) {
     calmar: "profileCalmar",
     return: "profileReturn",
     averageNav: "profileAverageNav",
+    balanced: "profileBalanced",
+    diverse: "profileDiverse",
     mdd20: "profileMdd20",
     mdd30: "profileMdd30",
     mdd40: "profileMdd40",
@@ -1796,6 +1901,26 @@ function requestPayload() {
   };
 }
 
+function numericInputValue(input, fallback, min = -Infinity, max = Infinity) {
+  const value = Number(input?.value);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function optimizerRequestOptions() {
+  const rebalanceModes = Array.from(document.querySelectorAll("[data-optimizer-rule]:checked")).map(
+    (input) => input.dataset.optimizerRule,
+  );
+  const maxDrawdownText = String(els.optimizerMaxDrawdownInput?.value || "").trim();
+  return {
+    step: els.optimizerStepInput?.value || "auto",
+    maxWeight: numericInputValue(els.optimizerMaxWeightInput, 85, 5, 100) / 100,
+    maxDrawdown: maxDrawdownText ? numericInputValue(els.optimizerMaxDrawdownInput, 0, 1, 95) / 100 : null,
+    limit: numericInputValue(els.optimizerLimitInput, 24, 8, 60),
+    rebalanceModes,
+  };
+}
+
 function setStatus(text, isError = false) {
   if (!state.result) {
     els.metricsGrid.innerHTML = `<div class="status ${isError ? "error" : ""}">${text}</div>`;
@@ -1889,6 +2014,17 @@ function updateInteractionLocks() {
   updateAddCurrentCompareButton();
   els.optimizeBtn.disabled = busy || state.optimizing;
   els.optimizeBtn.textContent = state.optimizing ? t("scanning") : t("scan");
+  for (const control of [
+    els.optimizerStepInput,
+    els.optimizerMaxWeightInput,
+    els.optimizerMaxDrawdownInput,
+    els.optimizerLimitInput,
+  ]) {
+    if (control) control.disabled = busy || state.optimizing;
+  }
+  document.querySelectorAll("[data-optimizer-rule]").forEach((input) => {
+    input.disabled = busy || state.optimizing;
+  });
   refreshOptimizerCompareButtons();
   if (els.chartLoading) {
     els.chartLoading.textContent = t("backtesting");
@@ -1907,11 +2043,15 @@ function updateInteractionLocks() {
   }
   for (const button of els.optimizerResults.querySelectorAll("button")) {
     if (button.dataset.action === "compare") {
-      const pendingOther = Boolean(state.comparison.pendingKey) && button.dataset.compareKey !== state.comparison.pendingKey;
-      button.disabled = busy || state.optimizing || pendingOther || button.dataset.comparisonLocked === "true";
+      continue;
+    } else if (button.dataset.optimizerBulk) {
+      continue;
     } else {
       button.disabled = busy || state.optimizing;
     }
+  }
+  for (const input of els.optimizerResults.querySelectorAll("[data-select-profile], [data-optimizer-select-visible]")) {
+    input.disabled = busy || state.optimizing;
   }
   for (const button of els.comparisonPanel?.querySelectorAll("button") || []) {
     button.disabled = busy || state.optimizing;
@@ -1955,6 +2095,7 @@ async function runBacktest(resetView = true) {
       state.result = result;
       state.backtestError = null;
       state.backtestDirty = false;
+      state.analysisDetailsCollapsed = false;
       syncVisibleSeries(result);
       mergeCatalogItems(result.assets);
       saveState();
@@ -1986,7 +2127,57 @@ async function runBacktest(resetView = true) {
   restoreScrollState(scrollSnapshot);
 }
 
+function renderAnalysisDetails() {
+  if (!els.analysisDetails) return;
+  const collapsed = Boolean(state.analysisDetailsCollapsed);
+  els.analysisDetails.classList.toggle("collapsed", collapsed);
+  els.analysisDetails.classList.toggle("expanded", !collapsed);
+  if (els.analysisToggleBtn) {
+    els.analysisToggleBtn.setAttribute("aria-expanded", String(!collapsed));
+  }
+  if (els.analysisToggleText) {
+    els.analysisToggleText.textContent = collapsed ? t("expandDetails") : t("collapseDetails");
+  }
+  scheduleOverlayScrollbarUpdate();
+  requestAnimationFrame(scheduleOverlayScrollbarUpdate);
+  window.setTimeout(scheduleOverlayScrollbarUpdate, 260);
+}
+
+function collapsibleModuleHeadMarkup({ title, hint, action, actionKey, expanded }) {
+  return `
+    <button type="button" class="collapsible-module-head" data-action="${escapeHtml(action)}" aria-expanded="${expanded ? "true" : "false"}">
+      <span class="collapsible-module-icon" aria-hidden="true"></span>
+      <span class="collapsible-module-copy">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(hint)}</span>
+      </span>
+      <span class="collapsible-module-action">${escapeHtml(t(actionKey))}</span>
+    </button>
+  `;
+}
+
+function renderOptimizerModuleState() {
+  if (!els.optimizerResults) return;
+  const collapsed = Boolean(state.optimizerCollapsed);
+  els.optimizerResults.classList.toggle("collapsed", collapsed);
+  els.optimizerResults.classList.toggle("expanded", !collapsed);
+  const button = els.optimizerResults.querySelector('[data-action="toggle-optimizer-module"]');
+  if (button) {
+    button.setAttribute("aria-expanded", String(!collapsed));
+    const action = button.querySelector(".collapsible-module-action");
+    if (action) action.textContent = collapsed ? t("expandScanResults") : t("collapseScanResults");
+  }
+  if (!collapsed) {
+    requestAnimationFrame(() => optimizerMapRedraw?.());
+    window.setTimeout(() => optimizerMapRedraw?.(), 240);
+  }
+  scheduleOverlayScrollbarUpdate();
+  requestAnimationFrame(scheduleOverlayScrollbarUpdate);
+  window.setTimeout(scheduleOverlayScrollbarUpdate, 260);
+}
+
 function renderAll() {
+  renderAnalysisDetails();
   if (!state.result) {
     if (isComparisonMode() && comparisonEntries().length) {
       renderChart();
@@ -2115,7 +2306,7 @@ function comparisonPayloadFromConfig(config) {
 function comparisonConfigFromProfile(profile) {
   return {
     title: profileTitle(profile),
-    assets: state.assets.map((asset) => ({ id: asset.id })),
+    assets: (profile.assets || state.assets).map((asset) => ({ id: asset.id })),
     weights: [...(profile.weights || [])],
     rebalance: { ...(profile.rebalance || {}) },
   };
@@ -2252,10 +2443,15 @@ async function addProfileToComparison(profile) {
   }
 }
 
-async function addAllProfilesToComparison() {
+async function addOptimizerProfilesToComparison(inputProfiles) {
   if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey || state.comparison.pendingAll) return;
   const existingKeys = new Set(state.comparison.items.map((item) => item.key));
-  const profiles = state.optimizerProfiles.filter((profile) => !existingKeys.has(profileComparisonKey(profile)));
+  const profiles = [];
+  for (const profile of inputProfiles || []) {
+    const key = profileComparisonKey(profile);
+    if (existingKeys.has(key) || profiles.some((item) => profileComparisonKey(item) === key)) continue;
+    profiles.push(profile);
+  }
   if (!profiles.length) return;
   enterComparisonMode();
   state.comparison.pendingAll = true;
@@ -2278,6 +2474,10 @@ async function addAllProfilesToComparison() {
     renderOptimizer(state.optimizerProfiles);
     if (errorMessage) renderComparisonPanel(errorMessage);
   }
+}
+
+async function addAllProfilesToComparison() {
+  return addOptimizerProfilesToComparison(state.optimizerProfiles);
 }
 
 function openComparisonEditor(mode = "new", config = currentComparisonConfig(), key = "") {
@@ -2965,17 +3165,29 @@ function renderChart() {
     ? []
     : assetSeries.filter((_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false);
   const compareSeries = compareEntries.map((entry) => entry.result.nav.slice(start, end + 1));
-  const allValues = [
-    ...(compareMode ? compareSeries.flat() : portfolioVisible ? nav : []),
-    ...(compareMode ? [] : visibleAssetSeries.flat()),
-  ];
-  if (!allValues.length) {
-    allValues.push(...nav);
+  const valueSeries = compareMode
+    ? compareSeries
+    : [...(portfolioVisible ? [nav] : []), ...visibleAssetSeries];
+  const seriesForScale = valueSeries.length ? valueSeries : [nav];
+  let rawMin = Infinity;
+  let rawMax = -Infinity;
+  let allPositive = true;
+  for (const series of seriesForScale) {
+    for (const value of series) {
+      if (!Number.isFinite(value)) continue;
+      rawMin = Math.min(rawMin, value);
+      rawMax = Math.max(rawMax, value);
+      if (value <= 0) allPositive = false;
+    }
   }
-  const useLogScale = state.chartScale === "log" && allValues.every((value) => value > 0);
-  const plottedValues = useLogScale ? allValues.map((value) => Math.log(value)) : allValues;
-  let plotMin = Math.min(...plottedValues);
-  let plotMax = Math.max(...plottedValues);
+  if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) {
+    rawMin = 0;
+    rawMax = 1;
+    allPositive = false;
+  }
+  const useLogScale = state.chartScale === "log" && allPositive;
+  let plotMin = useLogScale ? Math.log(rawMin) : rawMin;
+  let plotMax = useLogScale ? Math.log(rawMax) : rawMax;
   if (plotMin === plotMax) {
     plotMin *= 0.95;
     plotMax *= 1.05;
@@ -3298,9 +3510,16 @@ async function optimize() {
   try {
     const data = await api("/api/optimize", {
       method: "POST",
-      body: JSON.stringify(requestPayload()),
+      body: JSON.stringify({ ...requestPayload(), optimize: optimizerRequestOptions() }),
     });
-    renderOptimizer(data.profiles);
+    state.optimizerSelectedKeys = [];
+    state.optimizerFocusedKey = "";
+    state.optimizerTagFilter = "";
+    state.optimizerMapView = null;
+    state.optimizerCollapsed = false;
+    state.analysisDetailsCollapsed = true;
+    renderAnalysisDetails();
+    renderOptimizer(data.profiles, data.summary);
     restoreScrollState(scrollSnapshot);
   } catch (error) {
     els.optimizerResults.innerHTML = `<div class="status error">${error.message}</div>`;
@@ -3312,55 +3531,673 @@ async function optimize() {
   }
 }
 
-function renderOptimizer(profiles) {
+function optimizerSummaryMarkup(summary) {
+  if (!summary) return "";
+  const cards = [
+    [t("scannedCandidates"), String(summary.scanned ?? 0)],
+    [t("eligibleCandidates"), String(summary.eligible ?? summary.scanned ?? 0)],
+    [t("retainedCandidates"), String(summary.retained ?? 0)],
+    [t("gridStep"), fmtPct(summary.step ?? 0, 1)],
+    [t("maxWeight"), fmtPct(summary.maxWeight ?? 0, 0)],
+    [t("maxDrawdownLimit"), summary.maxDrawdown == null ? t("unlimited") : fmtPct(summary.maxDrawdown, 0)],
+    [t("annualShort"), `${fmtPct(summary.cagrRange?.[0])} - ${fmtPct(summary.cagrRange?.[1])}`],
+    [t("drawdownShort"), `${fmtPct(summary.drawdownRange?.[0])} - ${fmtPct(summary.drawdownRange?.[1])}`],
+    [t("averageNavShort"), `${fmtMultiple(summary.averageNavRange?.[0])} - ${fmtMultiple(summary.averageNavRange?.[1])}`],
+  ];
+  return `
+    <section class="optimizer-summary">
+      <div class="optimizer-summary-grid">
+        ${cards
+          .map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function optimizerProfileKey(profile) {
+  return profileComparisonKey(profile);
+}
+
+function optimizerTagsMarkup(profile) {
+  const tags = profile.tags || [];
+  if (!tags.length) return "";
+  return `<div class="optimizer-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
+}
+
+function optimizerActionsMarkup(profile, index) {
+  const compareKey = profileComparisonKey(profile);
+  const alreadyComparing = isComparisonMode() && state.comparison.items.some((item) => item.key === compareKey);
+  return `
+    <div class="opt-actions">
+      <button class="opt-action-primary" type="button" data-action="apply" data-profile-index="${index}">${escapeHtml(t("apply"))}</button>
+      <button class="opt-action-secondary" type="button" data-action="compare" data-profile-index="${index}" data-compare-key="${escapeHtml(compareKey)}">${escapeHtml(alreadyComparing ? t("comparing") : t("compare"))}</button>
+    </div>
+  `;
+}
+
+function featuredOptimizerProfiles(profiles) {
+  const preferredKinds = ["balanced", "return", "mdd20", "averageNav", "diverse"];
+  const featured = [];
+  preferredKinds.forEach((kind) => {
+    const match = profiles.find((profile) => profile.kind === kind && !featured.includes(profile));
+    if (match) featured.push(match);
+  });
+  profiles.forEach((profile) => {
+    if (featured.length >= 4) return;
+    if (!featured.includes(profile)) featured.push(profile);
+  });
+  return featured.slice(0, 4);
+}
+
+function optimizerSortValue(profile, key) {
+  const metrics = profile.metrics || {};
+  if (key === "title") return profileTitle(profile);
+  if (key === "cagr") return Number(metrics.cagr ?? -Infinity);
+  if (key === "drawdown") return Number(metrics.maxDrawdown ?? -Infinity);
+  if (key === "averageNav") return Number(metrics.averageNav ?? -Infinity);
+  if (key === "sharpe") return Number(metrics.sharpe0 ?? -Infinity);
+  if (key === "volatility") return Number(metrics.volatility ?? Infinity);
+  if (key === "rebalance") return rebalanceLabel(profile.rebalance);
+  return Number(profile.score?.composite ?? -Infinity);
+}
+
+function optimizerAvailableTags(profiles = state.optimizerProfiles) {
+  return Array.from(new Set(profiles.flatMap((profile) => profile.tags || []))).sort((a, b) => a.localeCompare(b));
+}
+
+function optimizerVisibleProfiles() {
+  const filter = state.optimizerTagFilter;
+  const profiles = state.optimizerProfiles.filter((profile) => !filter || (profile.tags || []).includes(filter));
+  const direction = state.optimizerSortDirection === "asc" ? 1 : -1;
+  return [...profiles].sort((a, b) => {
+    const av = optimizerSortValue(a, state.optimizerSortKey);
+    const bv = optimizerSortValue(b, state.optimizerSortKey);
+    let diff = 0;
+    if (typeof av === "string" || typeof bv === "string") {
+      diff = String(av).localeCompare(String(bv));
+    } else {
+      diff = Number(av) - Number(bv);
+    }
+    if (!Number.isFinite(diff) || diff === 0) {
+      diff = optimizerProfileKey(a).localeCompare(optimizerProfileKey(b));
+    }
+    return diff * direction;
+  });
+}
+
+function focusOptimizerProfile(key) {
+  if (!key) return;
+  state.optimizerFocusedKey = key;
+  renderOptimizer(state.optimizerProfiles);
+  requestAnimationFrame(() => {
+    const row = els.optimizerResults.querySelector(`[data-profile-key="${CSS.escape(key)}"]`);
+    row?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  });
+}
+
+function optimizerSortButton(key, label) {
+  const active = state.optimizerSortKey === key;
+  const suffix = active ? (state.optimizerSortDirection === "asc" ? " ↑" : " ↓") : "";
+  return `<button class="optimizer-sort-btn ${active ? "active" : ""}" type="button" data-optimizer-sort="${escapeHtml(key)}">${escapeHtml(label + suffix)}</button>`;
+}
+
+function optimizerResultToolbarMarkup(visibleProfiles, allTags) {
+  const selectedCount = state.optimizerSelectedKeys.length;
+  const visibleCount = visibleProfiles.length;
+  const visibleKeys = visibleProfiles.map(optimizerProfileKey);
+  const selectedVisibleCount = visibleKeys.filter((key) => state.optimizerSelectedKeys.includes(key)).length;
+  const allVisibleSelected = visibleCount > 0 && selectedVisibleCount === visibleCount;
+  const tagOptions = [
+    `<option value="">${escapeHtml(t("allTags"))}</option>`,
+    ...allTags.map(
+      (tag) => `<option value="${escapeHtml(tag)}" ${state.optimizerTagFilter === tag ? "selected" : ""}>${escapeHtml(tag)}</option>`,
+    ),
+  ].join("");
+  return `
+    <div class="optimizer-result-toolbar">
+      <label>
+        <span>${escapeHtml(t("scanFilters"))}</span>
+        <select data-optimizer-tag-filter>${tagOptions}</select>
+      </label>
+      <div class="optimizer-result-counts">
+        <span>${escapeHtml(t("visibleCandidates"))}: ${escapeHtml(String(visibleCount))}</span>
+        <span>${escapeHtml(t("selectedCandidates"))}: ${escapeHtml(String(selectedCount))}</span>
+      </div>
+      <div class="optimizer-bulk-actions">
+        <label class="optimizer-select-visible">
+          <input type="checkbox" data-optimizer-select-visible ${allVisibleSelected ? "checked" : ""} ${selectedVisibleCount > 0 && !allVisibleSelected ? "data-indeterminate=\"true\"" : ""} />
+          <span>${escapeHtml(t("selectVisible"))}</span>
+        </label>
+        <button type="button" data-optimizer-bulk="add-selected">${escapeHtml(t("addToCompare"))}</button>
+      </div>
+    </div>
+  `;
+}
+
+function optimizerMapMarkup() {
+  const helpText = [
+    t("candidateMapIntro"),
+    t("candidateMapAxisHint"),
+    t("candidateMapSizeHint"),
+    t("candidateMapColorHint"),
+    t("candidateMapInteractionHint"),
+  ].join("\n");
+  return `
+    <section class="optimizer-map-card">
+      <div class="optimizer-map-head">
+        <div class="optimizer-section-title optimizer-map-title">
+          <span>${escapeHtml(t("candidateMap"))}</span>
+          <span class="optimizer-map-help" tabindex="0" role="note" aria-label="${escapeHtml(helpText)}" data-tooltip="${escapeHtml(helpText)}">?</span>
+        </div>
+        <button type="button" class="optimizer-map-reset" data-optimizer-map-reset>${escapeHtml(t("resetMap"))}</button>
+      </div>
+      <canvas id="optimizerMapCanvas" class="optimizer-map-canvas" height="210"></canvas>
+      <div class="optimizer-map-legend">
+        <span>${escapeHtml(t("drawdownShort"))} →</span>
+        <span>${escapeHtml(t("annualShort"))} ↑</span>
+      </div>
+    </section>
+  `;
+}
+
+function optimizerMapBaseDomain(valid) {
+  const xs = valid.map((profile) => Math.abs(profile.metrics.maxDrawdown));
+  const ys = valid.map((profile) => profile.metrics.cagr);
+  const rawMinX = Math.min(...xs);
+  const rawMaxX = Math.max(...xs);
+  const rawMinY = Math.min(...ys);
+  const rawMaxY = Math.max(...ys);
+  const xPad = Math.max((rawMaxX - rawMinX) * 0.1, 0.005);
+  const yPad = Math.max((rawMaxY - rawMinY) * 0.14, 0.005);
+  return {
+    minX: Math.max(0, rawMinX - xPad),
+    maxX: rawMaxX + xPad,
+    minY: rawMinY - yPad,
+    maxY: rawMaxY + yPad,
+  };
+}
+
+function clampOptimizerMapView(view, base) {
+  const baseSpanX = Math.max(base.maxX - base.minX, 0.0001);
+  const baseSpanY = Math.max(base.maxY - base.minY, 0.0001);
+  const minSpanX = baseSpanX / 40;
+  const minSpanY = baseSpanY / 40;
+  let spanX = Math.max(minSpanX, Math.min(baseSpanX, view.maxX - view.minX));
+  let spanY = Math.max(minSpanY, Math.min(baseSpanY, view.maxY - view.minY));
+  let minX = view.minX;
+  let minY = view.minY;
+  if (spanX >= baseSpanX) {
+    minX = base.minX;
+    spanX = baseSpanX;
+  } else {
+    minX = Math.max(base.minX, Math.min(base.maxX - spanX, minX));
+  }
+  if (spanY >= baseSpanY) {
+    minY = base.minY;
+    spanY = baseSpanY;
+  } else {
+    minY = Math.max(base.minY, Math.min(base.maxY - spanY, minY));
+  }
+  return {
+    minX,
+    maxX: minX + spanX,
+    minY,
+    maxY: minY + spanY,
+  };
+}
+
+function optimizerMapGeometry(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(280, rect.width || 320);
+  const height = Math.max(190, rect.height || 210);
+  const pad = { left: 42, right: 18, top: 18, bottom: 32 };
+  return {
+    width,
+    height,
+    pad,
+    plotW: width - pad.left - pad.right,
+    plotH: height - pad.top - pad.bottom,
+  };
+}
+
+function renderOptimizerMap(profiles) {
+  const canvas = document.getElementById("optimizerMapCanvas");
+  if (!canvas) {
+    optimizerMapRedraw = null;
+    optimizerMapResizeObserver?.disconnect();
+    optimizerMapResizeObserver = null;
+    return;
+  }
+  optimizerMapResizeObserver?.disconnect();
+  const valid = profiles.filter((profile) => Number.isFinite(profile.metrics?.cagr) && Number.isFinite(profile.metrics?.maxDrawdown));
+  const base = valid.length ? optimizerMapBaseDomain(valid) : null;
+  if (base) {
+    state.optimizerMapView = state.optimizerMapView ? clampOptimizerMapView(state.optimizerMapView, base) : { ...base };
+  }
+  const avgNavs = valid.map((profile) => profile.metrics.averageNav || 1);
+  const minNav = avgNavs.length ? Math.min(...avgNavs) : 1;
+  const maxNav = avgNavs.length ? Math.max(...avgNavs) : 1;
+  let dragging = null;
+  let plottedPoints = [];
+
+  function draw() {
+    if (!document.body.contains(canvas)) return;
+    const { width, height, pad, plotW, plotH } = optimizerMapGeometry(canvas);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = cssVar("--item-bg");
+    ctx.fillRect(0, 0, width, height);
+
+    if (!valid.length || !base) {
+      ctx.fillStyle = cssVar("--muted");
+      ctx.font = "12px system-ui";
+      ctx.fillText(t("noResults"), 16, height / 2);
+      ctx.restore();
+      return;
+    }
+
+    const view = state.optimizerMapView || base;
+    const spanX = Math.max(view.maxX - view.minX, 0.0001);
+    const spanY = Math.max(view.maxY - view.minY, 0.0001);
+    const xFor = (value) => pad.left + (value - view.minX) / spanX * plotW;
+    const yFor = (value) => pad.top + (1 - (value - view.minY) / spanY) * plotH;
+
+    ctx.strokeStyle = cssVar("--line");
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, pad.top);
+    ctx.lineTo(pad.left, height - pad.bottom);
+    ctx.lineTo(width - pad.right, height - pad.bottom);
+    ctx.stroke();
+
+    ctx.fillStyle = cssVar("--muted");
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "left";
+    ctx.fillText(fmtPct(view.maxY, 0), 7, pad.top + 4);
+    ctx.fillText(fmtPct(view.minY, 0), 7, height - pad.bottom);
+    ctx.fillText(fmtPct(view.minX, 0), pad.left, height - 9);
+    ctx.textAlign = "right";
+    ctx.fillText(fmtPct(view.maxX, 0), width - pad.right, height - 9);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.left, pad.top, plotW, plotH);
+    ctx.clip();
+    const selected = new Set(state.optimizerSelectedKeys);
+    const featured = new Set(featuredOptimizerProfiles(state.optimizerProfiles).map(optimizerProfileKey));
+    plottedPoints = [];
+    valid.forEach((profile) => {
+      const key = optimizerProfileKey(profile);
+      const navRatio = maxNav === minNav ? 0.5 : (Number(profile.metrics.averageNav || minNav) - minNav) / (maxNav - minNav);
+      const radius = 4 + navRatio * 4;
+      const x = xFor(Math.abs(profile.metrics.maxDrawdown));
+      const y = yFor(profile.metrics.cagr);
+      plottedPoints.push({ key, profile, x, y, radius });
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = selected.has(key)
+        ? cssVar("--accent")
+        : featured.has(key)
+          ? cssVar("--active-text")
+          : cssVar("--button-text");
+      ctx.globalAlpha = selected.has(key) || featured.has(key) ? 0.9 : 0.45;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      if (selected.has(key)) {
+        ctx.strokeStyle = cssVar("--accent");
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      if (state.optimizerFocusedKey === key) {
+        ctx.strokeStyle = cssVar("--ink");
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    });
+
+    featuredOptimizerProfiles(valid).slice(0, 3).forEach((profile) => {
+      const x = xFor(Math.abs(profile.metrics.maxDrawdown));
+      const y = yFor(profile.metrics.cagr);
+      if (x < pad.left || x > width - pad.right || y < pad.top || y > height - pad.bottom) return;
+      ctx.fillStyle = cssVar("--ink");
+      ctx.font = "600 10px system-ui";
+      ctx.textAlign = x > width - 128 ? "right" : "left";
+      ctx.fillText(profileTitle(profile), x + (ctx.textAlign === "right" ? -8 : 8), Math.max(pad.top + 12, y - 8));
+    });
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function canvasPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  function nearestOptimizerPoint(point) {
+    return plottedPoints
+      .map((item) => ({ ...item, distance: Math.hypot(item.x - point.x, item.y - point.y) }))
+      .filter((item) => item.distance <= Math.max(12, item.radius + 7))
+      .sort((a, b) => a.distance - b.distance)[0];
+  }
+
+  function updateOptimizerMapCursor(event) {
+    if (dragging || !base) {
+      canvas.classList.remove("clickable");
+      return;
+    }
+    canvas.classList.toggle("clickable", Boolean(nearestOptimizerPoint(canvasPoint(event))));
+  }
+
+  function zoomAt(point, factor) {
+    if (!base || !state.optimizerMapView) return;
+    const { pad, plotW, plotH } = optimizerMapGeometry(canvas);
+    const boundedX = Math.max(pad.left, Math.min(pad.left + plotW, point.x));
+    const boundedY = Math.max(pad.top, Math.min(pad.top + plotH, point.y));
+    const view = state.optimizerMapView;
+    const spanX = view.maxX - view.minX;
+    const spanY = view.maxY - view.minY;
+    const xRatio = (boundedX - pad.left) / Math.max(plotW, 1);
+    const yRatio = (boundedY - pad.top) / Math.max(plotH, 1);
+    const domainX = view.minX + xRatio * spanX;
+    const domainY = view.maxY - yRatio * spanY;
+    const nextSpanX = spanX * factor;
+    const nextSpanY = spanY * factor;
+    state.optimizerMapView = clampOptimizerMapView(
+      {
+        minX: domainX - xRatio * nextSpanX,
+        maxX: domainX + (1 - xRatio) * nextSpanX,
+        minY: domainY - (1 - yRatio) * nextSpanY,
+        maxY: domainY + yRatio * nextSpanY,
+      },
+      base,
+    );
+    draw();
+  }
+
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      if (!base) return;
+      event.preventDefault();
+      zoomAt(canvasPoint(event), event.deltaY > 0 ? 1.18 : 0.84);
+    },
+    { passive: false },
+  );
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!base || !state.optimizerMapView) return;
+    dragging = { ...canvasPoint(event), moved: false, view: { ...state.optimizerMapView } };
+    canvas.setPointerCapture?.(event.pointerId);
+    canvas.classList.remove("clickable");
+    canvas.classList.add("dragging");
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!dragging || !base) {
+      updateOptimizerMapCursor(event);
+      return;
+    }
+    const point = canvasPoint(event);
+    if (Math.hypot(point.x - dragging.x, point.y - dragging.y) > 4) {
+      dragging.moved = true;
+    }
+    const { plotW, plotH } = optimizerMapGeometry(canvas);
+    const spanX = dragging.view.maxX - dragging.view.minX;
+    const spanY = dragging.view.maxY - dragging.view.minY;
+    const deltaX = -((point.x - dragging.x) / Math.max(plotW, 1)) * spanX;
+    const deltaY = ((point.y - dragging.y) / Math.max(plotH, 1)) * spanY;
+    state.optimizerMapView = clampOptimizerMapView(
+      {
+        minX: dragging.view.minX + deltaX,
+        maxX: dragging.view.maxX + deltaX,
+        minY: dragging.view.minY + deltaY,
+        maxY: dragging.view.maxY + deltaY,
+      },
+      base,
+    );
+    draw();
+  });
+  for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+    canvas.addEventListener(eventName, (event) => {
+      if (!dragging) return;
+      const finishedDrag = dragging;
+      dragging = null;
+      try {
+        if (canvas.hasPointerCapture?.(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      } catch {
+        // Pointer capture can already be gone if the browser cancels the gesture.
+      }
+      canvas.classList.remove("dragging");
+      if (eventName !== "pointerup" || finishedDrag.moved) {
+        canvas.classList.remove("clickable");
+        return;
+      }
+      const point = canvasPoint(event);
+      const nearest = nearestOptimizerPoint(point);
+      if (nearest) focusOptimizerProfile(nearest.key);
+      updateOptimizerMapCursor(event);
+    });
+  }
+  canvas.addEventListener("pointerleave", () => {
+    canvas.classList.remove("clickable");
+  });
+  els.optimizerResults.querySelector("[data-optimizer-map-reset]")?.addEventListener("click", () => {
+    state.optimizerMapView = base ? { ...base } : null;
+    draw();
+  });
+  optimizerMapRedraw = draw;
+  optimizerMapResizeObserver = new ResizeObserver(() => {
+    requestAnimationFrame(() => optimizerMapRedraw?.());
+  });
+  optimizerMapResizeObserver.observe(canvas);
+  draw();
+}
+
+function renderOptimizer(profiles, summary = state.optimizerSummary) {
   state.optimizerProfiles = profiles || [];
-  if (!profiles.length) {
+  state.optimizerSummary = summary || null;
+  const keys = new Set(state.optimizerProfiles.map(optimizerProfileKey));
+  state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((key) => keys.has(key));
+  if (state.optimizerFocusedKey && !keys.has(state.optimizerFocusedKey)) {
+    state.optimizerFocusedKey = "";
+  }
+  if (!state.optimizerProfiles.length) {
     els.optimizerResults.innerHTML = `<div class="status">${t("noResults")}</div>`;
+    els.optimizerResults.classList.remove("collapsed", "expanded");
+    optimizerMapRedraw = null;
+    optimizerMapResizeObserver?.disconnect();
+    optimizerMapResizeObserver = null;
     refreshOptimizerCompareButtons();
     return;
   }
-  els.optimizerResults.innerHTML = "";
-  refreshOptimizerCompareButtons();
-  for (const profile of profiles) {
-    const card = document.createElement("div");
-    card.className = "optimizer-card";
-    const m = profile.metrics;
-    const weightsText = weightsTextFromFractions(profile.weights);
-    const rule =
-      rebalanceLabel(profile.rebalance);
-    const compareKey = profileComparisonKey(profile);
-    const alreadyComparing = isComparisonMode() && state.comparison.items.some((item) => item.key === compareKey);
-    card.innerHTML = `
-      <div class="opt-head">
-        <strong>${profileTitle(profile)}</strong>
-        <span class="muted">${rule}</span>
+  const visibleProfiles = optimizerVisibleProfiles();
+  const allTags = optimizerAvailableTags(state.optimizerProfiles);
+  const featured = featuredOptimizerProfiles(state.optimizerProfiles);
+  const featuredKeys = new Set(featured.map(optimizerProfileKey));
+  const featuredMarkup = featured
+    .map((profile) => {
+      const index = state.optimizerProfiles.indexOf(profile);
+      const m = profile.metrics;
+      return `
+        <article class="optimizer-feature-card">
+          <div class="opt-head">
+            <strong>${escapeHtml(profileTitle(profile))}</strong>
+            <span class="muted">${escapeHtml(rebalanceLabel(profile.rebalance))}</span>
+          </div>
+          ${optimizerTagsMarkup(profile)}
+          <div class="optimizer-reason">${escapeHtml(profile.rankReason || "")}</div>
+          <div class="opt-grid">
+            <span>${escapeHtml(t("annualShort"))} ${escapeHtml(fmtPct(m.cagr))}</span>
+            <span>${escapeHtml(t("drawdownShort"))} ${escapeHtml(fmtPct(m.maxDrawdown))}</span>
+            <span>${escapeHtml(t("averageNavShort"))} ${escapeHtml(fmtMultiple(m.averageNav))}</span>
+            <span>${escapeHtml(t("compositeShort"))} ${escapeHtml(fmtNum((profile.score?.composite || 0) * 100, 0))}</span>
+          </div>
+          ${optimizerActionsMarkup(profile, index)}
+        </article>
+      `;
+    })
+    .join("");
+  const rows = visibleProfiles
+    .map((profile) => {
+      const index = state.optimizerProfiles.indexOf(profile);
+      const m = profile.metrics;
+      const weightsText = weightsTextFromConfig(profile.assets || state.assets, profile.weights);
+      const key = optimizerProfileKey(profile);
+      const selected = state.optimizerSelectedKeys.includes(key);
+      const focused = state.optimizerFocusedKey === key;
+      const isFeatured = featuredKeys.has(key);
+      return `
+        <tr class="${isFeatured ? "featured" : ""} ${selected ? "selected" : ""} ${focused ? "focused" : ""}" data-profile-key="${escapeHtml(key)}">
+          <td class="optimizer-select-cell"><input type="checkbox" data-select-profile="${escapeHtml(key)}" ${selected ? "checked" : ""} aria-label="${escapeHtml(t("selectCandidate"))}" /></td>
+          <td><strong>${escapeHtml(profileTitle(profile))}</strong>${optimizerTagsMarkup(profile)}<span>${escapeHtml(profile.rankReason || "")}</span></td>
+          <td>${escapeHtml(weightsText)}</td>
+          <td>${escapeHtml(rebalanceLabel(profile.rebalance))}</td>
+          <td>${escapeHtml(fmtPct(m.cagr))}</td>
+          <td>${escapeHtml(fmtPct(m.maxDrawdown))}</td>
+          <td>${escapeHtml(fmtMultiple(m.averageNav))}</td>
+          <td>${escapeHtml(fmtNum(m.sharpe0))}</td>
+          <td>${escapeHtml(fmtNum((profile.score?.composite || 0) * 100, 0))}</td>
+          <td>${optimizerActionsMarkup(profile, index)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+  const optimizerExpanded = !state.optimizerCollapsed;
+  els.optimizerResults.classList.toggle("collapsed", !optimizerExpanded);
+  els.optimizerResults.classList.toggle("expanded", optimizerExpanded);
+  els.optimizerResults.innerHTML = `
+    ${collapsibleModuleHeadMarkup({
+      title: t("scanResults"),
+      hint: t("scanResultsHint"),
+      action: "toggle-optimizer-module",
+      actionKey: optimizerExpanded ? "collapseScanResults" : "expandScanResults",
+      expanded: optimizerExpanded,
+    })}
+    <div class="collapsible-module-body">
+      <div class="collapsible-module-inner optimizer-module-inner">
+        <div class="optimizer-overview">
+          <div class="optimizer-side-stack">
+            <div class="optimizer-side-head">
+              <div class="optimizer-section-title">${escapeHtml(t("scanSummary"))}</div>
+            </div>
+            <div class="optimizer-side-scroll">
+              ${optimizerSummaryMarkup(summary)}
+              <section class="optimizer-featured">
+                <div class="optimizer-section-title">${escapeHtml(t("featuredCandidates"))}</div>
+                <div class="optimizer-feature-grid">${featuredMarkup}</div>
+              </section>
+            </div>
+          </div>
+          ${optimizerMapMarkup()}
+        </div>
+        <section class="optimizer-all">
+          <div class="optimizer-section-title">${escapeHtml(t("allCandidates"))}</div>
+          ${optimizerResultToolbarMarkup(visibleProfiles, allTags)}
+          <div class="optimizer-table-wrap">
+            <table class="optimizer-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>${optimizerSortButton("title", t("portfolio"))}</th>
+                  <th>${escapeHtml(t("weights"))}</th>
+                  <th>${optimizerSortButton("rebalance", t("rebalance"))}</th>
+                  <th>${optimizerSortButton("cagr", t("annualShort"))}</th>
+                  <th>${optimizerSortButton("drawdown", t("drawdownShort"))}</th>
+                  <th>${optimizerSortButton("averageNav", t("averageNavShort"))}</th>
+                  <th>${optimizerSortButton("sharpe", t("sharpeShort"))}</th>
+                  <th>${optimizerSortButton("composite", t("compositeShort"))}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </section>
       </div>
-      <div class="muted">${weightsText}</div>
-      <div class="opt-grid">
-        <span>${t("annualShort")} ${fmtPct(m.cagr)}</span>
-        <span>${t("drawdownShort")} ${fmtPct(m.maxDrawdown)}</span>
-        <span>${t("sharpeShort")} ${fmtNum(m.sharpe0)}</span>
-        <span>${t("averageNavShort")} ${fmtMultiple(m.averageNav)}</span>
-      </div>
-      <div class="opt-actions">
-        <button class="opt-action-primary" type="button" data-action="apply">${t("apply")}</button>
-        <button class="opt-action-secondary" type="button" data-action="compare">${alreadyComparing ? t("comparing") : t("compare")}</button>
-      </div>
-    `;
-    const applyButton = card.querySelector('button[data-action="apply"]');
-    const compareButton = card.querySelector('button[data-action="compare"]');
-    compareButton.dataset.compareKey = compareKey;
-    applyButton.disabled = state.loading || state.optimizing;
-    compareButton.disabled = state.loading || state.optimizing || alreadyComparing;
-    compareButton.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
-    applyButton.addEventListener("click", () => {
-      applyWeightsAndRebalance(profile.weights, profile.rebalance, state.assets);
+    </div>
+  `;
+  els.optimizerResults.querySelector('[data-action="toggle-optimizer-module"]')?.addEventListener("click", () => {
+    state.optimizerCollapsed = !state.optimizerCollapsed;
+    renderOptimizerModuleState();
+    ensureOverlayScrollbars();
+  });
+  renderOptimizerMap(visibleProfiles);
+  els.optimizerResults.querySelector("[data-optimizer-tag-filter]")?.addEventListener("change", (event) => {
+    state.optimizerTagFilter = event.target.value;
+    state.optimizerMapView = null;
+    renderOptimizer(state.optimizerProfiles);
+  });
+  els.optimizerResults.querySelectorAll("[data-optimizer-sort]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.optimizerSort;
+      if (state.optimizerSortKey === key) {
+        state.optimizerSortDirection = state.optimizerSortDirection === "asc" ? "desc" : "asc";
+      } else {
+        state.optimizerSortKey = key;
+        state.optimizerSortDirection = key === "title" || key === "rebalance" ? "asc" : "desc";
+      }
+      renderOptimizer(state.optimizerProfiles);
     });
-    compareButton.addEventListener("click", () => {
-      addProfileToComparison(profile);
+  });
+  els.optimizerResults.querySelectorAll("[data-select-profile]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const key = input.dataset.selectProfile;
+      if (input.checked && !state.optimizerSelectedKeys.includes(key)) {
+        state.optimizerSelectedKeys.push(key);
+        state.optimizerFocusedKey = key;
+      } else if (!input.checked) {
+        state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((item) => item !== key);
+        if (state.optimizerFocusedKey === key) state.optimizerFocusedKey = "";
+      }
+      renderOptimizer(state.optimizerProfiles);
     });
-    els.optimizerResults.appendChild(card);
+  });
+  const selectVisibleInput = els.optimizerResults.querySelector("[data-optimizer-select-visible]");
+  if (selectVisibleInput) {
+    selectVisibleInput.indeterminate = selectVisibleInput.dataset.indeterminate === "true";
+    selectVisibleInput.addEventListener("change", () => {
+      const visibleKeys = new Set(visibleProfiles.map(optimizerProfileKey));
+      if (selectVisibleInput.checked) {
+        const selected = new Set(state.optimizerSelectedKeys);
+        visibleKeys.forEach((key) => selected.add(key));
+        state.optimizerSelectedKeys = Array.from(selected);
+      } else {
+        state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((key) => !visibleKeys.has(key));
+        if (visibleKeys.has(state.optimizerFocusedKey)) state.optimizerFocusedKey = "";
+      }
+      renderOptimizer(state.optimizerProfiles);
+    });
   }
+  els.optimizerResults.querySelectorAll("[data-optimizer-bulk]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.optimizerBulk;
+      if (action === "add-selected") {
+        const selected = new Set(state.optimizerSelectedKeys);
+        addOptimizerProfilesToComparison(state.optimizerProfiles.filter((profile) => selected.has(optimizerProfileKey(profile))));
+      }
+    });
+  });
+  els.optimizerResults.querySelectorAll("button[data-profile-index]").forEach((button) => {
+    const profile = state.optimizerProfiles[Number(button.dataset.profileIndex)];
+    if (!profile) return;
+    button.disabled = state.loading || state.optimizing;
+    button.addEventListener("click", () => {
+      if (button.dataset.action === "apply") {
+        applyWeightsAndRebalance(profile.weights, profile.rebalance, profile.assets || state.assets);
+      } else {
+        addProfileToComparison(profile);
+      }
+    });
+  });
+  refreshOptimizerCompareButtons();
   ensureOverlayScrollbars();
 }
 
@@ -3371,8 +4208,31 @@ function refreshOptimizerCompareButtons() {
     const pending = state.comparison.pendingKey === key;
     button.textContent = pending ? t("backtesting") : alreadyComparing ? t("comparing") : t("compare");
     button.disabled =
-      state.loading || state.optimizing || alreadyComparing || Boolean(state.comparison.pendingKey) || state.comparison.pendingAll;
+      !state.result ||
+      state.loading ||
+      state.optimizing ||
+      alreadyComparing ||
+      Boolean(state.comparison.pendingKey) ||
+      state.comparison.pendingAll;
     button.dataset.comparisonLocked = alreadyComparing ? "true" : "false";
+  });
+  const existingKeys = new Set(state.comparison.items.map((item) => item.key));
+  const visibleProfiles = optimizerVisibleProfiles();
+  const selectedProfiles = state.optimizerProfiles.filter((profile) => state.optimizerSelectedKeys.includes(optimizerProfileKey(profile)));
+  const baseDisabled = state.loading || state.optimizing || state.comparison.pendingAll || Boolean(state.comparison.pendingKey);
+  const selectVisibleInput = els.optimizerResults.querySelector("[data-optimizer-select-visible]");
+  if (selectVisibleInput) {
+    selectVisibleInput.disabled = baseDisabled || !visibleProfiles.length;
+  }
+  els.optimizerResults.querySelectorAll("[data-optimizer-bulk]").forEach((button) => {
+    const action = button.dataset.optimizerBulk;
+    if (action === "add-selected") {
+      button.disabled =
+        !state.result ||
+        baseDisabled ||
+        !selectedProfiles.some((profile) => !existingKeys.has(optimizerProfileKey(profile)));
+      button.textContent = t("addToCompare");
+    }
   });
   const addAllButton = els.compareAllBtn;
   if (addAllButton) {
@@ -3381,7 +4241,13 @@ function refreshOptimizerCompareButtons() {
       state.optimizerProfiles.every((profile) => state.comparison.items.some((item) => item.key === profileComparisonKey(profile)));
     addAllButton.textContent = state.comparison.pendingAll ? t("comparingAll") : t("compareAll");
     addAllButton.disabled =
-      state.loading || state.optimizing || state.comparison.pendingAll || Boolean(state.comparison.pendingKey) || allAdded;
+      !state.result ||
+      state.loading ||
+      state.optimizing ||
+      state.comparison.pendingAll ||
+      Boolean(state.comparison.pendingKey) ||
+      allAdded ||
+      !state.optimizerProfiles.length;
   }
 }
 
@@ -3519,8 +4385,14 @@ function bindEvents() {
       renderChart();
       renderLegend();
     }
+    optimizerMapRedraw?.();
   });
   els.optimizeBtn.addEventListener("click", optimize);
+  els.analysisToggleBtn?.addEventListener("click", () => {
+    state.analysisDetailsCollapsed = !state.analysisDetailsCollapsed;
+    renderAnalysisDetails();
+    ensureOverlayScrollbars();
+  });
   els.compareAllBtn.addEventListener("click", addAllProfilesToComparison);
   els.addCurrentCompareBtn.addEventListener("click", addCurrentToComparison);
   els.resetZoomBtn.addEventListener("click", () => {
@@ -3541,6 +4413,7 @@ function bindEvents() {
   });
   window.addEventListener("resize", () => {
     renderChart();
+    optimizerMapRedraw?.();
     scheduleOverlayScrollbarUpdate();
   });
   window.addEventListener("scroll", scheduleOverlayScrollbarUpdate, { passive: true });

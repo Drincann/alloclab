@@ -83,7 +83,37 @@
               <button id="optimizeBtn" type="button" class="ghost-btn" data-i18n="scan">扫描</button>
             </div>
           </div>
-          <div id="optimizerResults" class="optimizer-list"></div>
+          <div class="optimizer-controls">
+            <label>
+              <span data-i18n="optimizerStep">步长</span>
+              <select id="optimizerStepInput">
+                <option value="auto" data-i18n="auto">自动</option>
+                <option value="0.025">2.5%</option>
+                <option value="0.05">5%</option>
+                <option value="0.1">10%</option>
+                <option value="0.2">20%</option>
+              </select>
+            </label>
+            <label>
+              <span data-i18n="maxWeight">最大权重</span>
+              <input id="optimizerMaxWeightInput" type="number" min="20" max="100" step="5" value="85" />
+            </label>
+            <label>
+              <span data-i18n="maxDrawdownLimit">回撤上限</span>
+              <input id="optimizerMaxDrawdownInput" type="number" min="1" max="95" step="1" data-i18n-placeholder="unlimited" placeholder="不限" />
+            </label>
+            <label>
+              <span data-i18n="resultCount">返回数量</span>
+              <input id="optimizerLimitInput" type="number" min="8" max="60" step="4" value="24" />
+            </label>
+          </div>
+          <div class="optimizer-rule-controls" aria-label="扫描再平衡规则">
+            <label><input type="checkbox" data-optimizer-rule="none" checked /><span data-i18n="rebalanceNone">不再平衡</span></label>
+            <label><input type="checkbox" data-optimizer-rule="annual" checked /><span data-i18n="rebalanceAnnual">每年</span></label>
+            <label><input type="checkbox" data-optimizer-rule="quarterly" checked /><span data-i18n="rebalanceQuarterly">每季</span></label>
+            <label><input type="checkbox" data-optimizer-rule="threshold" checked /><span data-i18n="rebalanceThreshold">阈值</span></label>
+            <label><input type="checkbox" data-optimizer-rule="monthly" /><span data-i18n="rebalanceMonthly">每月</span></label>
+          </div>
         </section>
       </aside>
 
@@ -130,22 +160,38 @@
 
         <section id="comparisonPanel" class="comparison-panel" hidden></section>
 
-        <section class="metrics-grid" id="metricsGrid"></section>
+        <section id="analysisDetails" class="analysis-details collapsible-module expanded">
+          <button id="analysisToggleBtn" type="button" class="collapsible-module-head" aria-expanded="true">
+            <span class="collapsible-module-icon" aria-hidden="true"></span>
+            <span class="collapsible-module-copy">
+              <strong data-i18n="analysisDetails">回测详情</strong>
+              <span data-i18n="analysisCollapsedHint">已折叠指标、相关性和再平衡记录</span>
+            </span>
+            <span id="analysisToggleText" class="collapsible-module-action" data-i18n="collapseDetails">折叠详情</span>
+          </button>
+          <div class="collapsible-module-body">
+            <div class="collapsible-module-inner analysis-detail-inner">
+              <section class="metrics-grid" id="metricsGrid"></section>
 
-        <section class="lower-grid">
-          <div class="panel">
-            <div class="panel-title">
-              <span data-i18n="correlation">相关性</span>
+              <section class="lower-grid">
+                <div class="panel">
+                  <div class="panel-title">
+                    <span data-i18n="correlation">相关性</span>
+                  </div>
+                  <div id="corrMatrix" class="corr-matrix"></div>
+                </div>
+                <div class="panel">
+                  <div class="panel-title">
+                    <span data-i18n="rebalanceRecords">再平衡记录</span>
+                  </div>
+                  <div id="rebalanceTable" class="event-table"></div>
+                </div>
+              </section>
             </div>
-            <div id="corrMatrix" class="corr-matrix"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-title">
-              <span data-i18n="rebalanceRecords">再平衡记录</span>
-            </div>
-            <div id="rebalanceTable" class="event-table"></div>
           </div>
         </section>
+
+        <section id="optimizerResults" class="optimizer-list optimizer-workbench collapsible-module expanded"></section>
       </section>
     </main>
     <script>
