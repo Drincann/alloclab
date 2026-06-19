@@ -16,3 +16,4 @@ Thumbs.db
 *.log
 
 data/shares/
+data/market_cache/

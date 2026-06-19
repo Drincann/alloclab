@@ -1,5 +1,8 @@
 import json
+import csv
+import hashlib
 import hmac
+import http.cookiejar
 import math
 import os
 import re
@@ -14,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -35,6 +39,12 @@ CATALOG = [
         "name": "Invesco QQQ Trust",
         "assetClass": "US Equity",
         "source": "yahoo",
+        "symbols": {
+            "yahoo_chart": "QQQ",
+            "stooq": "qqq.us",
+            "eastmoney_us": ["105.QQQ", "106.QQQ"],
+            "sina_us": "QQQ",
+        },
         "currency": "USD",
         "hintStart": "1999-03-10",
         "keywords": "nasdaq 100 qqq 纳指 纳斯达克 科技",
@@ -45,6 +55,12 @@ CATALOG = [
         "name": "SPDR Gold Shares",
         "assetClass": "Gold",
         "source": "yahoo",
+        "symbols": {
+            "yahoo_chart": "GLD",
+            "stooq": "gld.us",
+            "eastmoney_us": ["106.GLD", "105.GLD"],
+            "sina_us": "GLD",
+        },
         "currency": "USD",
         "hintStart": "2004-11-18",
         "keywords": "gold gld 黄金",
@@ -55,6 +71,12 @@ CATALOG = [
         "name": "SPDR S&P 500 ETF",
         "assetClass": "US Equity",
         "source": "yahoo",
+        "symbols": {
+            "yahoo_chart": "SPY",
+            "stooq": "spy.us",
+            "eastmoney_us": ["106.SPY", "105.SPY"],
+            "sina_us": "SPY",
+        },
         "currency": "USD",
         "hintStart": "1993-01-29",
         "keywords": "s&p500 sp500 标普",
@@ -65,6 +87,12 @@ CATALOG = [
         "name": "iShares 20+ Year Treasury Bond ETF",
         "assetClass": "US Bond",
         "source": "yahoo",
+        "symbols": {
+            "yahoo_chart": "TLT",
+            "stooq": "tlt.us",
+            "eastmoney_us": ["106.TLT", "105.TLT"],
+            "sina_us": "TLT",
+        },
         "currency": "USD",
         "hintStart": "2002-07-30",
         "keywords": "treasury long bond tlt 美债 长债",
@@ -134,13 +162,15 @@ CATALOG = [
 CATALOG_BY_ID = {item["id"]: item for item in CATALOG}
 FUND_CATALOG_PATH = APP_DIR / "data" / "fund_catalog.json"
 SHARE_DIR = APP_DIR / "data" / "shares"
-SERIES_CACHE = {}
+MARKET_CACHE_DIR = APP_DIR / "data" / "market_cache"
 SEARCH_CACHE = {}
 OPTIMIZE_CACHE = {}
 FUND_LIST_CACHE = None
 FUND_LIST_LOADING = False
 FUND_LIST_ERROR = None
 FUND_PROFILE_CACHE = {}
+PROVIDER_MEMORY_CACHE = {}
+PROVIDER_CACHE_LOCK = threading.Lock()
 YAHOO_SEARCH_DISABLED_UNTIL = 0
 YAHOO_SEARCH_COOLDOWN_SECONDS = 5 * 60
 MIN_BACKTEST_DAYS = 30
@@ -161,6 +191,7 @@ YAHOO_SYMBOL_FALLBACKS = {
 }
 ACCESS_KEY_ENV = "ALLOCLAB_ACCESS_KEY"
 KEY_HELP_URL_ENV = "ALLOCLAB_KEY_HELP_URL"
+STOOQ_API_KEY_ENV = "ALLOCLAB_STOOQ_API_KEY"
 LEGACY_ACCESS_KEY_ENV = "PORTFOLIO_APP_ACCESS_KEY"
 LEGACY_KEY_HELP_URL_ENV = "PORTFOLIO_APP_KEY_HELP_URL"
 AUTH_WINDOW_SECONDS = 5 * 60
@@ -193,6 +224,118 @@ def http_error_status(exc):
     return getattr(exc, "code", "") if isinstance(exc, urllib.error.HTTPError) else ""
 
 
+def market_cache_today():
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def market_cache_symbol_key(symbol):
+    key = re.sub(r"[^A-Za-z0-9._=-]+", "_", str(symbol).strip().lower())
+    return key or "unknown"
+
+
+def market_cache_path(source, symbol):
+    return MARKET_CACHE_DIR / source / f"{market_cache_symbol_key(symbol)}.json"
+
+
+def normalize_market_rows(rows):
+    out = []
+    seen = set()
+    for row in rows or []:
+        date = str(row.get("date") or "").strip()
+        if not date or date in seen:
+            continue
+        try:
+            close = float(row.get("close"))
+        except Exception:
+            continue
+        if close <= 0 or not math.isfinite(close):
+            continue
+        seen.add(date)
+        out.append({"date": date, "close": close})
+    return sorted(out, key=lambda item: item["date"])
+
+
+def read_provider_cache(source, symbol, allow_stale=False):
+    cache_key = (source, market_cache_symbol_key(symbol))
+    today = market_cache_today()
+    with PROVIDER_CACHE_LOCK:
+        cached = PROVIDER_MEMORY_CACHE.get(cache_key)
+        if cached and cached.get("rows") and (allow_stale or cached.get("cacheDate") == today):
+            return [dict(row) for row in cached["rows"]]
+
+    path = market_cache_path(source, symbol)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log_event("market.cache.read_error", source=source, symbol=symbol, error=type(exc).__name__)
+        return None
+
+    rows = normalize_market_rows(payload.get("rows") or [])
+    if not rows or (payload.get("cacheDate") != today and not allow_stale):
+        return None
+    with PROVIDER_CACHE_LOCK:
+        PROVIDER_MEMORY_CACHE[cache_key] = {"cacheDate": payload.get("cacheDate") or "", "rows": rows}
+    log_event(
+        "market.cache.hit" if payload.get("cacheDate") == today else "market.cache.stale_hit",
+        source=source,
+        symbol=symbol,
+        count=len(rows),
+        cache_date=payload.get("cacheDate") or "",
+    )
+    return [dict(row) for row in rows]
+
+
+def write_provider_cache(source, symbol, rows):
+    rows = normalize_market_rows(rows)
+    if not rows:
+        return rows
+    cache_key = (source, market_cache_symbol_key(symbol))
+    payload = {
+        "source": source,
+        "symbol": symbol,
+        "cacheDate": market_cache_today(),
+        "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    path = market_cache_path(source, symbol)
+    tmp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as tmp:
+            json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"))
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except Exception as exc:
+        log_event("market.cache.write_error", source=source, symbol=symbol, error=type(exc).__name__)
+        if tmp_path:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    with PROVIDER_CACHE_LOCK:
+        PROVIDER_MEMORY_CACHE[cache_key] = {"cacheDate": payload["cacheDate"], "rows": rows}
+    return [dict(row) for row in rows]
+
+
+def cached_provider_fetch(source, symbol, fetcher):
+    cached = read_provider_cache(source, symbol)
+    if cached is not None:
+        return cached
+    try:
+        rows = write_provider_cache(source, symbol, fetcher(symbol))
+    except Exception:
+        stale = read_provider_cache(source, symbol, allow_stale=True)
+        if stale is not None:
+            log_event("market.cache.stale_fallback", source=source, symbol=symbol, count=len(stale))
+            return stale
+        raise
+    log_event("market.cache.refresh", source=source, symbol=symbol, count=len(rows))
+    return rows
+
+
 def http_get_json(url, headers=None, timeout=30):
     req = urllib.request.Request(
         url,
@@ -206,7 +349,7 @@ def http_get_json(url, headers=None, timeout=30):
         return json.load(resp)
 
 
-def fetch_yahoo_chart(symbol):
+def fetch_yahoo_chart_uncached(symbol):
     end = int(time.time()) + 7 * 24 * 3600
     url = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -227,7 +370,11 @@ def fetch_yahoo_chart(symbol):
     return rows
 
 
-def fetch_sina_us_daily(symbol):
+def fetch_yahoo_chart(symbol):
+    return cached_provider_fetch("yahoo_chart", symbol, fetch_yahoo_chart_uncached)
+
+
+def fetch_sina_us_daily_uncached(symbol):
     sina_symbol = symbol.upper().split(".")[0]
     callback_name = re.sub(r"[^a-z0-9_]", "_", sina_symbol.lower())
     url = (
@@ -255,11 +402,19 @@ def fetch_sina_us_daily(symbol):
     return sorted(rows, key=lambda item: item["date"])
 
 
-def fetch_eastmoney_us_daily(symbol):
-    normalized_symbol = symbol.upper().split(".")[0]
+def fetch_sina_us_daily(symbol):
+    return cached_provider_fetch("sina_us", symbol, fetch_sina_us_daily_uncached)
+
+
+def fetch_eastmoney_us_daily_uncached(symbol):
+    raw_symbol = str(symbol or "").upper().strip()
+    normalized_symbol = raw_symbol.split(".")[-1]
     hosts = ["https://63.push2his.eastmoney.com", "https://push2his.eastmoney.com"]
-    # 105 is Nasdaq, 106 is NYSE. Trying both keeps dynamic Yahoo symbols usable.
-    secids = [f"105.{normalized_symbol}", f"106.{normalized_symbol}"]
+    if re.match(r"^(105|106)\.[A-Z0-9.-]+$", raw_symbol):
+        secids = [raw_symbol]
+    else:
+        # Legacy callers may still pass a bare US ticker. Provider mapping code should pass secids.
+        secids = [f"105.{normalized_symbol}", f"106.{normalized_symbol}"]
     last_error = None
     for host in hosts:
         for secid in secids:
@@ -304,37 +459,176 @@ def fetch_eastmoney_us_daily(symbol):
     raise RuntimeError(f"Eastmoney US daily data unavailable: {normalized_symbol}")
 
 
+def fetch_eastmoney_us_daily(symbol):
+    return cached_provider_fetch("eastmoney_us", symbol, fetch_eastmoney_us_daily_uncached)
+
+
+def stooq_symbol(symbol):
+    raw = symbol.upper().strip()
+    if "." in raw:
+        return raw.lower()
+    if re.match(r"^[A-Z][A-Z0-9.-]*$", raw):
+        return f"{raw.lower()}.us"
+    return raw.lower()
+
+
+def as_symbol_list(value):
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def is_plain_us_yahoo_symbol(symbol):
+    return bool(re.match(r"^[A-Z]{1,5}$", str(symbol or "").upper().strip()))
+
+
+def provider_symbols(meta, provider):
+    symbols = meta.get("symbols") or {}
+    explicit = as_symbol_list(symbols.get(provider))
+    if explicit:
+        return explicit
+
+    symbol = str(meta.get("symbol") or "").strip()
+    if not symbol:
+        return []
+
+    if provider == "yahoo_chart":
+        return [symbol]
+
+    if meta.get("source") != "yahoo" or not is_plain_us_yahoo_symbol(symbol):
+        return []
+
+    normalized = symbol.upper()
+    if provider == "stooq":
+        return [stooq_symbol(normalized)]
+    if provider == "eastmoney_us":
+        return [f"105.{normalized}", f"106.{normalized}"]
+    if provider == "sina_us":
+        return [normalized]
+    return []
+
+
+def yahoo_fallback_candidates(meta):
+    for provider, fetcher in YAHOO_FALLBACK_FETCHERS.items():
+        for native_symbol in provider_symbols(meta, provider):
+            yield provider, fetcher, native_symbol
+
+
+def solve_stooq_verify(text, url, opener, headers):
+    match = re.search(r'const c="([^"]+)",d=(\d+)', text)
+    if not match:
+        return False
+    challenge = match.group(1)
+    difficulty = int(match.group(2))
+    prefix = "0" * difficulty
+    nonce = 0
+    while nonce < 2_000_000:
+        digest = hashlib.sha256(f"{challenge}{nonce}".encode("utf-8")).hexdigest()
+        if digest.startswith(prefix):
+            break
+        nonce += 1
+    if nonce >= 2_000_000:
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    verify_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/__verify", "", ""))
+    body = urllib.parse.urlencode({"c": challenge, "n": str(nonce)}).encode("utf-8")
+    req = urllib.request.Request(
+        verify_url,
+        data=body,
+        headers={
+            **headers,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": url,
+        },
+        method="POST",
+    )
+    with opener.open(req, timeout=30) as resp:
+        return 200 <= resp.status < 300
+
+
+def fetch_stooq_daily_uncached(symbol):
+    normalized_symbol = str(symbol or "").strip().lower()
+    params = {"s": normalized_symbol, "i": "d"}
+    stooq_api_key = os.environ.get(STOOQ_API_KEY_ENV, "").strip()
+    if stooq_api_key:
+        params["apikey"] = stooq_api_key
+    url = "https://stooq.com/q/d/l/?" + urllib.parse.urlencode(params)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,text/plain,*/*",
+    }
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    req = urllib.request.Request(url, headers=headers)
+    with opener.open(req, timeout=30) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    if "This site requires JavaScript to verify your browser" in text and solve_stooq_verify(text, url, opener, headers):
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=30) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    if text.strip().lower().startswith("access denied"):
+        raise RuntimeError("Stooq access denied; set ALLOCLAB_STOOQ_API_KEY if your environment requires it")
+    rows = []
+    for row in csv.DictReader(text.splitlines()):
+        date = row.get("Date")
+        close = row.get("Close")
+        if not date or close in (None, "", "N/D"):
+            continue
+        close_value = float(close)
+        if close_value > 0:
+            rows.append({"date": date, "close": close_value})
+    if not rows:
+        raise RuntimeError(f"Stooq daily data unavailable: {normalized_symbol}")
+    return sorted(rows, key=lambda item: item["date"])
+
+
+def fetch_stooq_daily(symbol):
+    native_symbol = str(symbol or "").strip().lower()
+    if "." not in native_symbol:
+        native_symbol = stooq_symbol(symbol)
+    return cached_provider_fetch("stooq", native_symbol, fetch_stooq_daily_uncached)
+
+
+YAHOO_FALLBACK_FETCHERS = {
+    "stooq": fetch_stooq_daily,
+    "eastmoney_us": fetch_eastmoney_us_daily,
+    "sina_us": fetch_sina_us_daily,
+}
+
+
 def fetch_yahoo(symbol):
+    meta = {"id": symbol, "symbol": symbol, "source": "yahoo"}
     try:
         return fetch_yahoo_chart(symbol)
     except Exception as yahoo_exc:
-        try:
-            rows = fetch_eastmoney_us_daily(symbol)
-            if rows:
-                log_event("market.yahoo_fallback.eastmoney_us", symbol=symbol, count=len(rows))
-                return rows
-        except Exception as eastmoney_exc:
+        for source, fetcher, provider_symbol in yahoo_fallback_candidates(meta):
+            try:
+                rows = fetcher(provider_symbol)
+                if rows:
+                    log_event(
+                        f"market.yahoo_fallback.{source}",
+                        symbol=symbol,
+                        provider_symbol=provider_symbol,
+                        count=len(rows),
+                    )
+                    return rows
+            except Exception as fallback_exc:
+                log_event(
+                    f"market.yahoo_fallback.{source}_error",
+                    symbol=symbol,
+                    provider_symbol=provider_symbol,
+                    yahoo_error=type(yahoo_exc).__name__,
+                    yahoo_status=http_error_status(yahoo_exc),
+                    fallback_error=type(fallback_exc).__name__,
+                    fallback_status=http_error_status(fallback_exc),
+                )
+        if not list(yahoo_fallback_candidates(meta)):
             log_event(
-                "market.yahoo_fallback.eastmoney_us_error",
+                "market.yahoo_fallback.skipped",
                 symbol=symbol,
-                yahoo_error=type(yahoo_exc).__name__,
-                yahoo_status=http_error_status(yahoo_exc),
-                eastmoney_error=type(eastmoney_exc).__name__,
-                eastmoney_status=http_error_status(eastmoney_exc),
-            )
-        try:
-            rows = fetch_sina_us_daily(symbol)
-            if rows:
-                log_event("market.yahoo_fallback.sina_us", symbol=symbol, count=len(rows))
-                return rows
-        except Exception as sina_exc:
-            log_event(
-                "market.yahoo_fallback.sina_us_error",
-                symbol=symbol,
-                yahoo_error=type(yahoo_exc).__name__,
-                yahoo_status=http_error_status(yahoo_exc),
-                sina_error=type(sina_exc).__name__,
-                sina_status=http_error_status(sina_exc),
+                reason="no_provider_symbol_mapping",
             )
         raise MarketDataUnavailable(symbol, http_error_status(yahoo_exc), type(yahoo_exc).__name__) from yahoo_exc
 
@@ -913,7 +1207,7 @@ def search_assets(query):
     log_event("search.done", query=query or "-", count=len(completed_items), elapsed_ms=int((time.time() - started) * 1000))
     return completed_items
 
-def fetch_csindex(symbol):
+def fetch_csindex_uncached(symbol):
     if ak is None:
         raise RuntimeError("AKShare 不可用，请先安装到 work/pydeps。")
     df = ak.stock_zh_index_hist_csindex(
@@ -928,7 +1222,11 @@ def fetch_csindex(symbol):
     return sorted(rows, key=lambda item: item["date"])
 
 
-def fetch_fund_nav(symbol, value_field="LJJZ"):
+def fetch_csindex(symbol):
+    return cached_provider_fetch("csindex", symbol, fetch_csindex_uncached)
+
+
+def fetch_fund_nav_uncached(symbol, value_field="LJJZ"):
     rows = []
     prev_first = None
     for page in range(1, 500):
@@ -959,7 +1257,12 @@ def fetch_fund_nav(symbol, value_field="LJJZ"):
     return sorted(out, key=lambda item: item["date"])
 
 
-def fetch_sina(symbol):
+def fetch_fund_nav(symbol, value_field="LJJZ"):
+    cache_source = f"fund_nav_{value_field.lower()}"
+    return cached_provider_fetch(cache_source, symbol, lambda item_symbol: fetch_fund_nav_uncached(item_symbol, value_field))
+
+
+def fetch_sina_uncached(symbol):
     url = (
         "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
         f"CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen=6000"
@@ -972,6 +1275,10 @@ def fetch_sina(symbol):
         for row in data
         if row.get("day") and float(row["close"]) > 0
     )
+
+
+def fetch_sina(symbol):
+    return cached_provider_fetch("sina_cn", symbol, fetch_sina_uncached)
 
 
 def _series_starts_too_late(asset_id, rows, hint_start=""):
@@ -1005,6 +1312,7 @@ def _fallback_source_rows(source, fetcher, symbol, log_symbol, hint_start=""):
         log_event(
             f"market.yahoo_fallback.{source}_rejected",
             symbol=log_symbol,
+            provider_symbol=symbol,
             count=len(rows),
             start=rows[0]["date"] if rows else "",
             warnings=",".join(warnings),
@@ -1015,25 +1323,26 @@ def _fallback_source_rows(source, fetcher, symbol, log_symbol, hint_start=""):
 
 def _yahoo_series_with_backfill(meta, symbol):
     hint_start = meta.get("hintStart", "")
+    yahoo_symbols = provider_symbols(meta, "yahoo_chart") or [meta["symbol"]]
+    yahoo_symbol = yahoo_symbols[0]
     try:
-        rows = fetch_yahoo_chart(meta["symbol"])
+        rows = fetch_yahoo_chart(yahoo_symbol)
     except Exception as yahoo_exc:
         log_event(
             "market.yahoo.error",
             symbol=meta["id"],
+            provider_symbol=yahoo_symbol,
             error=type(yahoo_exc).__name__,
             status=http_error_status(yahoo_exc),
         )
-        for source, fetcher in (
-            ("eastmoney_us", fetch_eastmoney_us_daily),
-            ("sina_us", fetch_sina_us_daily),
-        ):
+        for source, fetcher, provider_symbol in yahoo_fallback_candidates(meta):
             try:
-                fallback_rows = _fallback_source_rows(source, fetcher, symbol, meta["id"], hint_start)
+                fallback_rows = _fallback_source_rows(source, fetcher, provider_symbol, meta["id"], hint_start)
             except Exception as exc:
                 log_event(
                     f"market.yahoo_fallback.{source}_error",
                     symbol=meta["id"],
+                    provider_symbol=provider_symbol,
                     yahoo_error=type(yahoo_exc).__name__,
                     yahoo_status=http_error_status(yahoo_exc),
                     fallback_error=type(exc).__name__,
@@ -1041,7 +1350,12 @@ def _yahoo_series_with_backfill(meta, symbol):
                 )
                 continue
             if fallback_rows:
-                log_event(f"market.yahoo_fallback.{source}", symbol=meta["id"], count=len(fallback_rows))
+                log_event(
+                    f"market.yahoo_fallback.{source}",
+                    symbol=meta["id"],
+                    provider_symbol=provider_symbol,
+                    count=len(fallback_rows),
+                )
                 return fallback_rows
         raise MarketDataUnavailable(meta["id"], http_error_status(yahoo_exc), type(yahoo_exc).__name__) from yahoo_exc
 
@@ -1069,23 +1383,26 @@ def _yahoo_series_with_backfill(meta, symbol):
         source="yahoo",
     )
     fallback_rows = None
-    for source, fetcher in (
-        ("eastmoney_us", fetch_eastmoney_us_daily),
-        ("sina_us", fetch_sina_us_daily),
-    ):
+    for source, fetcher, provider_symbol in yahoo_fallback_candidates(meta):
         try:
-            fallback_rows = _fallback_source_rows(source, fetcher, symbol, meta["id"], hint_start)
+            fallback_rows = _fallback_source_rows(source, fetcher, provider_symbol, meta["id"], hint_start)
         except Exception as exc:
             log_event(
                 f"market.yahoo_fallback.{source}_error",
                 symbol=meta["id"],
+                provider_symbol=provider_symbol,
                 yahoo_error="start_gap",
                 fallback_error=type(exc).__name__,
                 fallback_status=http_error_status(exc),
             )
             continue
         if fallback_rows:
-            log_event(f"market.yahoo_fallback.{source}", symbol=meta["id"], count=len(fallback_rows))
+            log_event(
+                f"market.yahoo_fallback.{source}",
+                symbol=meta["id"],
+                provider_symbol=provider_symbol,
+                count=len(fallback_rows),
+            )
             break
     if not fallback_rows:
         return rows
@@ -1102,19 +1419,6 @@ def get_series(asset_id, force_refresh=False):
     dynamic_meta = get_asset_meta(asset_id)
     if dynamic_meta is None:
         raise ValueError(f"未知标的：{asset_id}")
-
-    if not force_refresh and asset_id in SERIES_CACHE:
-        cached = SERIES_CACHE[asset_id]
-        if _series_starts_too_late(asset_id, cached):
-            SERIES_CACHE.pop(asset_id, None)
-            log_event(
-                "market.series.cache_drift",
-                symbol=asset_id,
-                cached_start=cached[0]["date"],
-                cached_count=len(cached),
-            )
-        else:
-            return cached
 
     meta = dynamic_meta
     source = meta["source"]
@@ -1141,7 +1445,6 @@ def get_series(asset_id, force_refresh=False):
             count=len(rows),
             source=source,
         )
-    SERIES_CACHE[asset_id] = rows
     return rows
 
 
