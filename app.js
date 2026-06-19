@@ -129,6 +129,8 @@ let debounceTimer = null;
 let searchDebounceTimer = null;
 let searchRequestSeq = 0;
 let searchAbortController = null;
+let backtestAbortController = null;
+let backtestRunId = 0;
 let comparisonDragEndedAt = 0;
 let comparisonPointerDrag = null;
 let comparisonDragRepaintFrame = null;
@@ -1421,7 +1423,7 @@ function renderShareDialog() {
   els.shareCreateBtn.disabled = state.loading || dialog.generating;
   els.shareCreateBtn.textContent = dialog.generating ? t("creatingShareLink") : t("createShareLink");
   els.shareApplyBtn.style.display = dialog.mode === "received" ? "" : "none";
-  els.shareApplyBtn.disabled = state.loading;
+  els.shareApplyBtn.disabled = false;
   els.shareOverlay.classList.add("active");
   els.shareOverlay.setAttribute("aria-hidden", "false");
   requestAnimationFrame(() => {
@@ -1838,8 +1840,26 @@ function applyFavorite(id) {
   applyPortfolioSnapshot(favorite);
 }
 
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function cancelActiveBacktest() {
+  if (backtestAbortController) {
+    backtestAbortController.abort();
+    backtestAbortController = null;
+  }
+  backtestRunId += 1;
+  state.loading = false;
+  state.pendingBacktestResetView = null;
+  updateInteractionLocks();
+}
+
 function applyPortfolioSnapshot(portfolio, options = {}) {
-  if (state.loading || !portfolio) return;
+  if (!portfolio) return;
+  if (state.loading) {
+    cancelActiveBacktest();
+  }
   const shouldRun = options.autoRun !== false;
   mergeCatalogItems(portfolio.catalog || []);
   state.assets = (portfolio.assets || []).map((asset) => ({
@@ -2058,7 +2078,7 @@ function updateInteractionLocks() {
   }
   if (state.shareDialog) {
     els.shareCreateBtn.disabled = busy || state.shareDialog.generating;
-    els.shareApplyBtn.disabled = busy;
+    els.shareApplyBtn.disabled = state.shareDialog.mode !== "received";
   }
 }
 
@@ -2081,50 +2101,65 @@ async function runBacktest(resetView = true) {
     return;
   }
   const scrollSnapshot = captureScrollState();
+  const runId = backtestRunId + 1;
+  backtestRunId = runId;
+  const controller = new AbortController();
+  backtestAbortController = controller;
   state.loading = true;
   state.pendingBacktestResetView = null;
   updateInteractionLocks();
-  while (true) {
-    const shouldResetView = resetView;
-    saveState();
-    try {
-      const result = await api("/api/backtest", {
-        method: "POST",
-        body: JSON.stringify(requestPayload()),
-      });
-      state.result = result;
-      state.backtestError = null;
-      state.backtestDirty = false;
-      state.analysisDetailsCollapsed = false;
-      syncVisibleSeries(result);
-      mergeCatalogItems(result.assets);
+  try {
+    while (true) {
+      const shouldResetView = resetView;
       saveState();
-      if (shouldResetView || !state.view) {
-        state.view = { start: 0, end: result.dates.length - 1 };
-      } else {
-        state.view.end = Math.min(state.view.end, result.dates.length - 1);
+      try {
+        const result = await api("/api/backtest", {
+          method: "POST",
+          body: JSON.stringify(requestPayload()),
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || runId !== backtestRunId) return;
+        state.result = result;
+        state.backtestError = null;
+        state.backtestDirty = false;
+        state.analysisDetailsCollapsed = false;
+        syncVisibleSeries(result);
+        mergeCatalogItems(result.assets);
+        saveState();
+        if (shouldResetView || !state.view) {
+          state.view = { start: 0, end: result.dates.length - 1 };
+        } else {
+          state.view.end = Math.min(state.view.end, result.dates.length - 1);
+        }
+        renderAll();
+        restoreScrollState(scrollSnapshot);
+      } catch (error) {
+        if (isAbortError(error) || controller.signal.aborted || runId !== backtestRunId) {
+          return;
+        }
+        if (error.status === 401) {
+          state.loading = false;
+          state.pendingBacktestResetView = null;
+          updateInteractionLocks();
+          throw error;
+        }
+        renderBacktestError(error);
+        restoreScrollState(scrollSnapshot);
       }
-      renderAll();
-      restoreScrollState(scrollSnapshot);
-    } catch (error) {
-      if (error.status === 401) {
-        state.loading = false;
-        state.pendingBacktestResetView = null;
-        updateInteractionLocks();
-        throw error;
+      if (state.pendingBacktestResetView === null) {
+        break;
       }
-      renderBacktestError(error);
+      resetView = state.pendingBacktestResetView;
+      state.pendingBacktestResetView = null;
+    }
+  } finally {
+    if (runId === backtestRunId) {
+      state.loading = false;
+      backtestAbortController = null;
+      updateInteractionLocks();
       restoreScrollState(scrollSnapshot);
     }
-    if (state.pendingBacktestResetView === null) {
-      break;
-    }
-    resetView = state.pendingBacktestResetView;
-    state.pendingBacktestResetView = null;
   }
-  state.loading = false;
-  updateInteractionLocks();
-  restoreScrollState(scrollSnapshot);
 }
 
 function renderAnalysisDetails() {
@@ -4480,6 +4515,7 @@ async function bootstrapApp() {
     state.bootstrapped = true;
     if (hasShareToken) {
       await loadSharedPortfolioFromUrl();
+      return;
     }
     await runBacktest(true);
   } catch (error) {
