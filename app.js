@@ -102,6 +102,7 @@ const els = {
   shareNameInput: document.getElementById("shareNameInput"),
   shareAdvanced: document.getElementById("shareAdvanced"),
   shareHostInput: document.getElementById("shareHostInput"),
+  shareTargetKeyInput: document.getElementById("shareTargetKeyInput"),
   sharePrimaryMetric: document.getElementById("sharePrimaryMetric"),
   shareCurveCanvas: document.getElementById("shareCurveCanvas"),
   shareSummary: document.getElementById("shareSummary"),
@@ -200,12 +201,15 @@ const I18N = {
     shareAdvanced: "高级配置",
     shareHost: "发布地址",
     shareHostPlaceholder: "当前页面地址",
+    shareTargetKey: "目标密钥",
+    shareTargetKeyPlaceholder: "目标服务访问密钥",
     portfolioWeights: "组合比例",
     weights: "权重",
     shareDraftHint: "确认展示效果后生成链接",
     shareCreatedHint: "复制链接后发给别人",
     createShareFailed: "生成分享链接失败",
     invalidShareHost: "发布地址无效",
+    invalidShareTargetKey: "目标服务访问密钥无效",
     loadShareFailed: "分享链接读取失败",
     noShareMetrics: "暂无回测指标",
     favoriteName: "组合名称",
@@ -414,12 +418,15 @@ const I18N = {
     shareAdvanced: "Advanced",
     shareHost: "Publish host",
     shareHostPlaceholder: "Current page host",
+    shareTargetKey: "Target key",
+    shareTargetKeyPlaceholder: "Target service access key",
     portfolioWeights: "Weights",
     weights: "Weights",
     shareDraftHint: "Review the presentation, then create a link",
     shareCreatedHint: "Copy the link and send it",
     createShareFailed: "Failed to create share link",
     invalidShareHost: "Invalid publish host",
+    invalidShareTargetKey: "Invalid target service access key",
     loadShareFailed: "Failed to load share link",
     noShareMetrics: "No backtest metrics yet",
     favoriteName: "Portfolio name",
@@ -1381,6 +1388,16 @@ function sharePublishBaseUrl() {
   }
 }
 
+function shareTargetAccessKey(baseUrl) {
+  const explicitKey = (els.shareTargetKeyInput?.value || "").trim();
+  if (explicitKey) return explicitKey;
+  try {
+    return new URL(baseUrl).origin === window.location.origin ? storedAccessKey() : "";
+  } catch {
+    return "";
+  }
+}
+
 function shareUrlForToken(token, baseUrl = sharePublishBaseUrl()) {
   const url = new URL(window.location.pathname || "/", baseUrl);
   url.search = `?share=${encodeURIComponent(token)}`;
@@ -1567,9 +1584,12 @@ function closeShareDialog() {
 
 async function createShare(portfolio) {
   const publishBaseUrl = sharePublishBaseUrl();
+  const targetAccessKey = shareTargetAccessKey(publishBaseUrl);
   const data = await api(new URL("/api/share", publishBaseUrl).toString(), {
     method: "POST",
     body: JSON.stringify({ portfolio }),
+    accessKey: targetAccessKey,
+    showAuthOnUnauthorized: false,
   });
   return {
     portfolio: data.portfolio || portfolio,
@@ -1655,7 +1675,8 @@ async function createShareFromDialog() {
     const created = await createShare(portfolio);
     showShareDialog(created.portfolio, { mode: "created", url: created.url });
   } catch (error) {
-    state.shareDialog = { mode: "draft", portfolio, url: "", status: error.message || t("createShareFailed"), generating: false };
+    const status = error.status === 401 ? t("invalidShareTargetKey") : error.message || t("createShareFailed");
+    state.shareDialog = { mode: "draft", portfolio, url: "", status, generating: false };
     renderShareDialog();
   }
 }
@@ -1828,23 +1849,31 @@ async function loadSharedPortfolioFromUrl() {
 }
 
 async function api(path, options = {}) {
+  const {
+    accessKey,
+    showAuthOnUnauthorized = true,
+    headers: optionHeaders = {},
+    ...fetchOptions
+  } = options;
   const headers = {
     "Content-Type": "application/json",
-    ...(options.headers || {}),
+    ...optionHeaders,
   };
-  const key = storedAccessKey();
+  const key = accessKey === undefined ? storedAccessKey() : accessKey;
   if (key) {
     headers["X-Access-Key"] = key;
   }
   const response = await fetch(path, {
-    ...options,
+    ...fetchOptions,
     headers,
   });
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) {
-    clearStoredAccessKey();
     const message = normalizeErrorMessage(data.error || t("authInvalid"));
-    showAuthOverlay(message);
+    if (showAuthOnUnauthorized) {
+      clearStoredAccessKey();
+      showAuthOverlay(message);
+    }
     const error = new Error(message);
     error.status = response.status;
     throw error;

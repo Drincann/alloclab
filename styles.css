@@ -319,7 +319,7 @@ body {
   user-select: none;
 }
 
-.share-host-row {
+.share-publish-row {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr);
   gap: 8px;
@@ -327,12 +327,12 @@ body {
   margin-top: 8px;
 }
 
-.share-host-row span {
+.share-publish-row span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.share-host-row input {
+.share-publish-row input {
   width: 100%;
   min-height: 34px;
   padding: 0 10px;
@@ -2781,7 +2781,7 @@ h2 {
 
   .share-link-row,
   .share-name-row,
-  .share-host-row,
+  .share-publish-row,
   .share-hero,
   .share-summary,
   .share-metrics {
