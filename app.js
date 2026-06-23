@@ -2368,6 +2368,92 @@ function drawChartMessage(title, lines = [], isError = false) {
   ctx.restore();
 }
 
+function drawShareLoadingPreview() {
+  const { canvas, dpr, width, height } = canvasGeometry();
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const cssWidth = width / dpr;
+  const cssHeight = height / dpr;
+  const pad = { left: 58, right: 32, top: 38, bottom: 72 };
+  const plotW = Math.max(1, cssWidth - pad.left - pad.right);
+  const plotH = Math.max(1, cssHeight - pad.top - pad.bottom);
+  ctx.fillStyle = cssVar("--canvas-bg");
+  ctx.fillRect(0, 0, cssWidth, cssHeight);
+  ctx.strokeStyle = cssVar("--grid");
+  ctx.lineWidth = 1;
+  for (let index = 0; index <= 5; index += 1) {
+    const y = pad.top + (plotH * index) / 5;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(cssWidth - pad.right, y);
+    ctx.stroke();
+  }
+  for (let index = 0; index <= 4; index += 1) {
+    const x = pad.left + (plotW * index) / 4;
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, cssHeight - pad.bottom);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = cssVar("--axis");
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, cssHeight - pad.bottom);
+  ctx.lineTo(cssWidth - pad.right, cssHeight - pad.bottom);
+  ctx.stroke();
+
+  const series = [
+    { color: cssVar("--accent"), width: 3.2, offset: 0.05, drift: 1.85, wave: 0.2 },
+    { color: "#4e6c9d", width: 1.6, offset: 0.18, drift: 1.35, wave: 0.32 },
+    { color: "#7a4e89", width: 1.4, offset: 0.24, drift: 1.05, wave: 0.44 },
+    { color: "#3a7d44", width: 1.4, offset: 0.34, drift: 0.68, wave: 0.38 },
+  ];
+  series.forEach((item, seriesIndex) => {
+    ctx.beginPath();
+    const pointCount = 96;
+    for (let index = 0; index < pointCount; index += 1) {
+      const progress = index / (pointCount - 1);
+      const cycle = Math.sin(progress * Math.PI * (2.8 + seriesIndex * 0.45) + seriesIndex * 0.9);
+      const ripple = Math.sin(progress * Math.PI * (9.5 + seriesIndex) + seriesIndex) * 0.035;
+      const pullback = Math.max(0, Math.sin((progress - 0.62) * Math.PI * 5)) * (0.06 + seriesIndex * 0.01);
+      const value = item.offset + progress * item.drift + cycle * item.wave + ripple - pullback;
+      const normalized = Math.max(0.02, Math.min(0.98, value / 2.25));
+      const x = pad.left + progress * plotW;
+      const y = pad.top + (1 - normalized) * plotH;
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = item.color;
+    ctx.lineWidth = item.width;
+    ctx.globalAlpha = seriesIndex === 0 ? 0.92 : 0.58;
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = cssVar("--legend-bg");
+  ctx.strokeStyle = cssVar("--legend-border");
+  ctx.lineWidth = 1;
+  const legendX = pad.left + 12;
+  const legendY = pad.top + 10;
+  const legendW = 260;
+  const legendH = 34;
+  ctx.beginPath();
+  ctx.rect(legendX, legendY, legendW, legendH);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = cssVar("--legend-text");
+  ctx.font = "12px system-ui";
+  ["组合", "资产 A", "资产 B"].forEach((label, index) => {
+    const x = legendX + 14 + index * 78;
+    ctx.fillStyle = series[index].color;
+    ctx.fillRect(x, legendY + 15, 18, 3);
+    ctx.fillStyle = cssVar("--legend-text");
+    ctx.fillText(label, x + 24, legendY + 20);
+  });
+  ctx.restore();
+}
+
 function renderBacktestError(error) {
   const isMarketDataIssue = error?.kind === "market_data_unavailable";
   const title = isMarketDataIssue ? t("marketDataIssueTitle") : t("chartUnavailableTitle");
@@ -2593,7 +2679,7 @@ function renderOptimizerModuleState() {
 function renderAll() {
   renderAnalysisDetails();
   if (state.shareView.loading) {
-    drawChartMessage("", [], false);
+    drawShareLoadingPreview();
     clearChartLegend();
     renderComparisonPanel();
     ensureOverlayScrollbars();
