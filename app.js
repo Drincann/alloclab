@@ -48,6 +48,7 @@ const state = {
     highlightedKey: "",
     sortKey: "",
     sortDirection: "desc",
+    viewMode: "branch",
     pendingKey: "",
     pendingAll: false,
     editor: null,
@@ -304,6 +305,9 @@ const I18N = {
     comparing: "已加入",
     exitCompare: "退出对比",
     compareMode: "对比模式",
+    comparisonViewMode: "展示口径",
+    comparisonBranchMode: "树杈",
+    comparisonOverlapMode: "共同起点",
     currentPortfolio: "当前组合",
     compareTableTitle: "组合对比",
     noFavorites: "暂无收藏",
@@ -523,6 +527,9 @@ const I18N = {
     comparing: "Added",
     exitCompare: "Exit Compare",
     compareMode: "Compare mode",
+    comparisonViewMode: "View",
+    comparisonBranchMode: "Branch",
+    comparisonOverlapMode: "Common start",
     currentPortfolio: "Current portfolio",
     compareTableTitle: "Portfolio comparison",
     noFavorites: "No saved portfolios",
@@ -1068,8 +1075,115 @@ function comparisonEntries() {
   return sortedComparisonItems();
 }
 
+function comparisonViewMode() {
+  return state.comparison.viewMode || "branch";
+}
+
+function yearsBetweenDates(start, end) {
+  const startMs = Date.parse(`${start}T00:00:00Z`);
+  const endMs = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0;
+  return (endMs - startMs) / (365.25 * 24 * 60 * 60 * 1000);
+}
+
+function addCalendarYears(dateText, years) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  const originalMonth = date.getUTCMonth();
+  date.setUTCFullYear(date.getUTCFullYear() + years);
+  if (date.getUTCMonth() !== originalMonth) date.setUTCDate(0);
+  return date.toISOString().slice(0, 10);
+}
+
+function withdrawalMetricsForSeries(dates, values, annualRate = 0.04, inflationRate = 0.025) {
+  if (dates.length < 2 || values.length < 2) {
+    return { rate: annualRate, inflationRate, terminal: 1, cagr: 0, depleted: false, depletedDate: "" };
+  }
+  let value = 1;
+  let withdrawals = 0;
+  let totalWithdrawn = 0;
+  let withdrawalAmount = annualRate;
+  let depletedDate = "";
+  let nextWithdrawalDate = addCalendarYears(dates[0], 1);
+  for (let i = 1; i < values.length; i += 1) {
+    value *= values[i] / values[i - 1];
+    while (dates[i] >= nextWithdrawalDate) {
+      value -= withdrawalAmount;
+      withdrawals += 1;
+      totalWithdrawn += withdrawalAmount;
+      if (value <= 0) {
+        depletedDate = dates[i];
+        value = 0;
+        break;
+      }
+      withdrawalAmount *= 1 + inflationRate;
+      nextWithdrawalDate = addCalendarYears(dates[0], withdrawals + 1);
+    }
+    if (depletedDate) break;
+  }
+  const years = yearsBetweenDates(dates[0], depletedDate || dates[dates.length - 1]);
+  return {
+    rate: annualRate,
+    inflationRate,
+    terminal: value,
+    cagr: value > 0 && years > 0 ? value ** (1 / years) - 1 : null,
+    depleted: Boolean(depletedDate),
+    depletedDate,
+    withdrawals,
+    totalWithdrawn,
+  };
+}
+
+function metricsForDateSeries(dates, values) {
+  const pairs = dates
+    .map((date, index) => ({ date, value: Number(values[index]) }))
+    .filter((point) => point.date && Number.isFinite(point.value) && point.value > 0);
+  if (pairs.length < 2) return {};
+  const cleanDates = pairs.map((point) => point.date);
+  const cleanValues = pairs.map((point) => point.value / pairs[0].value);
+  const returns = cleanValues.slice(1).map((value, index) => value / cleanValues[index] - 1);
+  const years = yearsBetweenDates(cleanDates[0], cleanDates[cleanDates.length - 1]);
+  let peak = cleanValues[0];
+  let maxDrawdown = 0;
+  const drawdowns = cleanValues.map((value) => {
+    peak = Math.max(peak, value);
+    const drawdown = value / peak - 1;
+    maxDrawdown = Math.min(maxDrawdown, drawdown);
+    return drawdown;
+  });
+  const meanReturn = returns.reduce((sum, ret) => sum + ret, 0) / Math.max(1, returns.length);
+  const variance =
+    returns.length > 1
+      ? returns.reduce((sum, ret) => sum + (ret - meanReturn) ** 2, 0) / (returns.length - 1)
+      : 0;
+  const volatility = Math.sqrt(variance * 252);
+  const cagr = years > 0 ? cleanValues[cleanValues.length - 1] ** (1 / years) - 1 : 0;
+  const averageNav = cleanValues.reduce((sum, value) => sum + value, 0) / cleanValues.length;
+  return {
+    start: cleanDates[0],
+    end: cleanDates[cleanDates.length - 1],
+    years,
+    totalReturn: cleanValues[cleanValues.length - 1] - 1,
+    cagr,
+    volatility,
+    maxDrawdown,
+    sharpe0: volatility ? cagr / volatility : null,
+    calmar: maxDrawdown ? cagr / Math.abs(maxDrawdown) : null,
+    averageNav,
+    ulcerIndex: Math.sqrt(drawdowns.reduce((sum, drawdown) => sum + drawdown * drawdown, 0) / drawdowns.length),
+    withdrawal4: withdrawalMetricsForSeries(cleanDates, cleanValues),
+  };
+}
+
+function comparisonMetricsForEntry(entry) {
+  if (comparisonViewMode() !== "overlap") return entry.result?.metrics || {};
+  const entries = state.comparison.items || [];
+  const dates = comparisonChartDates(entries);
+  const values = comparisonSeriesForEntry(entry, dates, entries);
+  return metricsForDateSeries(dates, values);
+}
+
 function comparisonSortValue(entry, sortKey) {
-  const metrics = entry.result?.metrics || {};
+  const metrics = comparisonMetricsForEntry(entry);
   if (sortKey === "portfolio") return entry.title || "";
   if (sortKey === "rebalance") return rebalanceLabel(entry.rebalance);
   if (sortKey === "cagr") return Number(metrics.cagr ?? -Infinity);
@@ -1118,6 +1232,15 @@ function setComparisonSort(sortKey) {
     state.comparison.sortDirection = sortKey === "drawdown" ? "asc" : "desc";
   }
   renderAll();
+}
+
+function setComparisonViewMode(mode) {
+  if (!["branch", "overlap"].includes(mode) || comparisonViewMode() === mode) return;
+  state.comparison.viewMode = mode;
+  resetComparisonView();
+  renderChart();
+  renderLegend();
+  renderComparisonPanel();
 }
 
 function visibleComparisonEntries() {
@@ -2896,6 +3019,7 @@ function exitComparisonMode() {
     highlightedKey: "",
     sortKey: "",
     sortDirection: "desc",
+    viewMode: "branch",
     pendingKey: "",
     pendingAll: false,
     editor: null,
@@ -2925,6 +3049,7 @@ function clearComparisonForEdit() {
     highlightedKey: "",
     sortKey: "",
     sortDirection: "desc",
+    viewMode: "branch",
     pendingKey: "",
     pendingAll: false,
     editor: null,
@@ -3435,7 +3560,7 @@ function renderComparisonPanel(message = "") {
   els.comparisonPanel.hidden = false;
   const rows = entries
     .map((entry) => {
-      const metrics = entry.result.metrics || {};
+      const metrics = comparisonMetricsForEntry(entry);
       const hidden = isComparisonHidden(entry.key);
       const rowClasses = hidden ? "muted-item" : "";
       const displayTitle = comparisonDisplayTitle(entry, entries);
@@ -3463,6 +3588,10 @@ function renderComparisonPanel(message = "") {
         ${message ? `<span class="error">${escapeHtml(message)}</span>` : `<span>${escapeHtml(t("compareMode"))}</span>`}
       </div>
       <div class="comparison-head-actions">
+        <div class="comparison-view-toggle" role="group" aria-label="${escapeHtml(t("comparisonViewMode"))}">
+          <button type="button" data-comparison-view="branch" class="${comparisonViewMode() === "branch" ? "active" : ""}">${escapeHtml(t("comparisonBranchMode"))}</button>
+          <button type="button" data-comparison-view="overlap" class="${comparisonViewMode() === "overlap" ? "active" : ""}">${escapeHtml(t("comparisonOverlapMode"))}</button>
+        </div>
         <button class="ghost-btn" type="button" data-action="new-compare">${escapeHtml(t("newCompareItem"))}</button>
         <button class="ghost-btn comparison-exit-btn" type="button" data-action="exit-compare">${escapeHtml(t("exitCompare"))}</button>
       </div>
@@ -3486,6 +3615,9 @@ function renderComparisonPanel(message = "") {
   `;
   els.comparisonPanel.querySelectorAll("button[data-sort]").forEach((button) => {
     button.addEventListener("click", () => setComparisonSort(button.dataset.sort));
+  });
+  els.comparisonPanel.querySelectorAll("button[data-comparison-view]").forEach((button) => {
+    button.addEventListener("click", () => setComparisonViewMode(button.dataset.comparisonView));
   });
   els.comparisonPanel.querySelector('button[data-action="exit-compare"]')?.addEventListener("click", exitComparisonMode);
   els.comparisonPanel.querySelector('button[data-action="new-compare"]')?.addEventListener("click", () => {
@@ -3628,7 +3760,7 @@ function canvasGeometry() {
 
 function chartResultForView() {
   if (isComparisonMode()) {
-    const dates = comparisonDateAxis(comparisonEntries());
+    const dates = comparisonChartDates(comparisonEntries());
     if (!dates.length) return state.result;
     return {
       dates,
@@ -3648,9 +3780,54 @@ function comparisonDateAxis(entries = visibleComparisonEntries()) {
   return Array.from(dates).sort();
 }
 
+function comparisonEntryStart(entry) {
+  return entry?.result?.dates?.[0] || "";
+}
+
+function comparisonEntryEnd(entry) {
+  const dates = entry?.result?.dates || [];
+  return dates[dates.length - 1] || "";
+}
+
+function comparisonEntrySpan(entry) {
+  const start = comparisonEntryStart(entry);
+  const end = comparisonEntryEnd(entry);
+  return start && end ? Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`) : 0;
+}
+
+function comparisonAnchorEntry(entries = comparisonEntries()) {
+  return [...entries].sort((a, b) => {
+    const spanDiff = comparisonEntrySpan(b) - comparisonEntrySpan(a);
+    if (spanDiff) return spanDiff;
+    return comparisonEntryStart(a).localeCompare(comparisonEntryStart(b));
+  })[0];
+}
+
+function comparisonLatestStartEntry(entries = comparisonEntries()) {
+  return [...entries].sort((a, b) => comparisonEntryStart(b).localeCompare(comparisonEntryStart(a)))[0];
+}
+
+function comparisonChartDates(entries = comparisonEntries()) {
+  const validEntries = entries.filter((entry) => entry.result?.dates?.length);
+  if (!validEntries.length) return [];
+  if (comparisonViewMode() === "overlap") {
+    const latestStart = validEntries.reduce((maxDate, entry) => Math.max(maxDate, Date.parse(`${comparisonEntryStart(entry)}T00:00:00Z`)), 0);
+    const earliestEnd = validEntries.reduce(
+      (minDate, entry) => Math.min(minDate, Date.parse(`${comparisonEntryEnd(entry)}T00:00:00Z`)),
+      Infinity,
+    );
+    const axisEntry = comparisonLatestStartEntry(validEntries);
+    return (axisEntry?.result?.dates || []).filter((date) => {
+      const value = Date.parse(`${date}T00:00:00Z`);
+      return value >= latestStart && value <= earliestEnd;
+    });
+  }
+  return comparisonAnchorEntry(validEntries)?.result?.dates || comparisonDateAxis(validEntries);
+}
+
 function resetComparisonView() {
   if (!isComparisonMode()) return;
-  const dates = comparisonDateAxis(comparisonEntries());
+  const dates = comparisonChartDates(comparisonEntries());
   state.view = dates.length ? { start: 0, end: dates.length - 1 } : null;
 }
 
@@ -3669,6 +3846,31 @@ function alignedSeriesForDates(result, dates) {
     }
     if (date < firstDate || date > lastDate) return null;
     return lastValue;
+  });
+}
+
+function comparisonSeriesForEntry(entry, dates, entries = comparisonEntries()) {
+  const rawSeries = alignedSeriesForDates(entry.result, dates);
+  if (comparisonViewMode() === "overlap") {
+    const base = rawSeries.find((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+    return rawSeries.map((value) => (Number.isFinite(Number(value)) && base ? Number(value) / base : null));
+  }
+  const anchor = comparisonAnchorEntry(entries);
+  if (!anchor || anchor.key === entry.key) return rawSeries;
+  const anchorSeries = alignedSeriesForDates(anchor.result, dates);
+  const branchIndex = rawSeries.findIndex(
+    (value, index) =>
+      Number.isFinite(Number(value)) &&
+      Number(value) > 0 &&
+      Number.isFinite(Number(anchorSeries[index])) &&
+      Number(anchorSeries[index]) > 0,
+  );
+  if (branchIndex < 0) return dates.map(() => null);
+  const ownBase = Number(rawSeries[branchIndex]);
+  const anchorBase = Number(anchorSeries[branchIndex]);
+  return rawSeries.map((value, index) => {
+    if (index < branchIndex || !Number.isFinite(Number(value)) || ownBase <= 0) return null;
+    return anchorBase * (Number(value) / ownBase);
   });
 }
 
@@ -3737,14 +3939,14 @@ function renderChart() {
   const dates = chartViewResult.dates.slice(start, end + 1);
   const full = viewResult.metrics;
   els.rangeLabel.textContent = compareMode
-    ? `${t("compareMode")} · ${t("currentView")} ${chartViewResult.dates[start]} ${t("to")} ${chartViewResult.dates[end]}`
+    ? `${t("compareMode")} · ${t(comparisonViewMode() === "overlap" ? "comparisonOverlapMode" : "comparisonBranchMode")} · ${t("currentView")} ${chartViewResult.dates[start]} ${t("to")} ${chartViewResult.dates[end]}`
     : `${t("currentView")} ${viewResult.dates[start]} ${t("to")} ${viewResult.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
   const assetSeries = compareMode ? [] : state.result.assetSeries.map((series) => series.slice(start, end + 1));
   const portfolioVisible = state.visibleSeries.portfolio !== false;
   const visibleAssetSeries = compareMode
     ? []
     : assetSeries.filter((_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false);
-  const compareSeries = compareEntries.map((entry) => alignedSeriesForDates(entry.result, dates));
+  const compareSeries = compareEntries.map((entry) => comparisonSeriesForEntry(entry, dates, allCompareEntries));
   const valueSeries = compareMode
     ? compareSeries
     : [...(portfolioVisible ? [nav] : []), ...visibleAssetSeries];
@@ -3782,23 +3984,26 @@ function renderChart() {
   const targetPlotPoints = Math.max(32, Math.floor(plotW / 2));
   const isFinitePointValue = (value) => Number.isFinite(Number(value));
   const samplePlotPoints = (series, mode = "average") => {
+    const validIndexes = series
+      .map((value, index) => (isFinitePointValue(value) ? index : -1))
+      .filter((index) => index >= 0);
+    if (!validIndexes.length) return [];
+    const firstValid = validIndexes[0];
+    const lastValid = validIndexes[validIndexes.length - 1];
     if (series.length <= targetPlotPoints * 1.25) {
-      return series.map((value, i) => ({ i, value }));
+      return series.map((value, i) => ({ i, value })).filter((point) => isFinitePointValue(point.value));
     }
-    const points = [{ i: 0, value: series[0] }];
-    const bucketSize = (series.length - 1) / Math.max(1, targetPlotPoints - 1);
+    const points = [{ i: firstValid, value: series[firstValid] }];
+    const bucketSize = (lastValid - firstValid) / Math.max(1, targetPlotPoints - 1);
     for (let bucket = 1; bucket < targetPlotPoints - 1; bucket++) {
-      const startIdx = Math.max(1, Math.floor(bucket * bucketSize));
-      const endIdx = Math.min(series.length - 2, Math.floor((bucket + 1) * bucketSize));
+      const startIdx = Math.max(firstValid + 1, Math.floor(firstValid + bucket * bucketSize));
+      const endIdx = Math.min(lastValid - 1, Math.floor(firstValid + (bucket + 1) * bucketSize));
       if (endIdx < startIdx) continue;
       const bucketValues = [];
       for (let i = startIdx; i <= endIdx; i++) {
         if (isFinitePointValue(series[i])) bucketValues.push(Number(series[i]));
       }
-      if (!bucketValues.length) {
-        points.push({ i: Math.round((startIdx + endIdx) / 2), value: null });
-        continue;
-      }
+      if (!bucketValues.length) continue;
       let value = bucketValues[0];
       if (mode === "min") {
         for (const candidate of bucketValues) value = Math.min(value, candidate);
@@ -3809,7 +4014,7 @@ function renderChart() {
       }
       points.push({ i: Math.round((startIdx + endIdx) / 2), value });
     }
-    points.push({ i: series.length - 1, value: series[series.length - 1] });
+    points.push({ i: lastValid, value: series[lastValid] });
     return points;
   };
   const drawSampledSeries = (series, valueToY = y, mode = "average") => {
@@ -4052,11 +4257,12 @@ function showTooltip(event) {
   const weights = state.result?.weightsTimeline[idx] || [];
   if (isComparisonMode()) {
     const entries = visibleComparisonEntries();
+    const allEntries = comparisonEntries();
     els.tooltip.innerHTML = `
       <strong>${date}</strong><br>
       ${entries
         .map((entry) => {
-          const value = resultValueOnDate(entry.result, date);
+          const value = comparisonSeriesForEntry(entry, viewResult.dates, allEntries)[idx];
           return `${escapeHtml(comparisonDisplayTitle(entry))} ${Number.isFinite(value) ? fmtNum(value, 3) : "--"}`;
         })
         .join("<br>")}

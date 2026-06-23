@@ -1837,6 +1837,32 @@ html.share-boot #chartLoading::after {
   padding: 0 10px;
 }
 
+.comparison-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--button-bg);
+}
+
+.comparison-view-toggle button {
+  min-height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.comparison-view-toggle button.active {
+  background: var(--active-bg);
+  color: var(--active-text);
+}
+
 .comparison-exit-btn {
   min-height: 30px;
   padding: 0 10px;
