@@ -303,6 +303,7 @@ const I18N = {
     invalidCompareConfig: "请填写至少一个标的，并确保权重大于 0。",
     customPortfolio: "自定义组合",
     comparing: "已加入",
+    enterCompare: "进入对比",
     exitCompare: "退出对比",
     compareMode: "对比模式",
     comparisonViewMode: "展示口径",
@@ -525,6 +526,7 @@ const I18N = {
     invalidCompareConfig: "Enter at least one asset and make sure total weight is above 0.",
     customPortfolio: "Custom portfolio",
     comparing: "Added",
+    enterCompare: "Enter Compare",
     exitCompare: "Exit Compare",
     compareMode: "Compare mode",
     comparisonViewMode: "View",
@@ -3594,7 +3596,6 @@ function renderComparisonPanel(message = "") {
           <button type="button" data-comparison-view="overlap" class="${comparisonViewMode() === "overlap" ? "active" : ""}">${escapeHtml(t("comparisonOverlapMode"))}</button>
         </div>
         <button class="ghost-btn" type="button" data-action="new-compare">${escapeHtml(t("newCompareItem"))}</button>
-        <button class="ghost-btn comparison-exit-btn" type="button" data-action="exit-compare">${escapeHtml(t("exitCompare"))}</button>
       </div>
     </div>
     <div class="comparison-table-wrap">
@@ -3620,12 +3621,11 @@ function renderComparisonPanel(message = "") {
   els.comparisonPanel.querySelectorAll("button[data-comparison-view]").forEach((button) => {
     button.addEventListener("click", () => setComparisonViewMode(button.dataset.comparisonView));
   });
-  els.comparisonPanel.querySelector('button[data-action="exit-compare"]')?.addEventListener("click", exitComparisonMode);
   els.comparisonPanel.querySelector('button[data-action="new-compare"]')?.addEventListener("click", () => {
     openComparisonEditor("new", currentComparisonConfig());
   });
   els.comparisonPanel.querySelectorAll("button[data-action]").forEach((button) => {
-    if (button.dataset.action === "exit-compare" || button.dataset.action === "new-compare") return;
+    if (button.dataset.action === "new-compare") return;
     button.disabled = state.loading || state.optimizing;
     button.addEventListener("click", () => {
       const item = state.comparison.items.find((candidate) => candidate.key === button.dataset.key);
@@ -5140,7 +5140,7 @@ function updateAddCurrentCompareButton() {
   if (!els.addCurrentCompareBtn) return;
   const busy = state.loading || state.optimizing || Boolean(state.comparison.pendingKey) || state.comparison.pendingAll;
   const compareMode = isComparisonMode();
-  els.addCurrentCompareBtn.textContent = compareMode ? t("exitCompare") : t("newCompareItem");
+  els.addCurrentCompareBtn.textContent = compareMode ? t("exitCompare") : t("enterCompare");
   els.addCurrentCompareBtn.classList.toggle("danger-btn", compareMode);
   els.addCurrentCompareBtn.disabled = compareMode ? state.loading : busy;
 }
@@ -5288,7 +5288,11 @@ function bindEvents() {
       updateAddCurrentCompareButton();
       return;
     }
-    addCurrentToComparison();
+    enterComparisonMode();
+    resetComparisonView();
+    renderAll();
+    renderOptimizer(state.optimizerProfiles);
+    updateAddCurrentCompareButton();
   });
   els.resetZoomBtn.addEventListener("click", () => {
     if (!state.result || state.loading) return;

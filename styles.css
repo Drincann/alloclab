@@ -1875,12 +1875,6 @@ html.share-boot #chartLoading::after {
   color: var(--active-text);
 }
 
-.comparison-exit-btn {
-  min-height: 30px;
-  padding: 0 10px;
-  flex: 0 0 auto;
-}
-
 .comparison-table-wrap {
   overflow-x: auto;
 }

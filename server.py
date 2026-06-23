@@ -1301,9 +1301,12 @@ def fetch_sina_uncached(symbol):
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return sorted(
-        {"date": row["day"], "close": float(row["close"])}
-        for row in data
-        if row.get("day") and float(row["close"]) > 0
+        (
+            {"date": row["day"], "close": float(row["close"])}
+            for row in data
+            if row.get("day") and float(row["close"]) > 0
+        ),
+        key=lambda item: item["date"],
     )
 
 
@@ -2080,6 +2083,22 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
     return result
 
 
+def parse_payload_assets(raw_assets):
+    if not isinstance(raw_assets, list):
+        raise ValueError("资产列表格式不正确。")
+    asset_ids = []
+    weights = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            raise ValueError("资产项格式不正确。")
+        raw_id = item.get("id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            raise ValueError("资产代码格式不正确。")
+        asset_ids.append(raw_id.strip().upper())
+        weights.append(float(item.get("weight", 0)))
+    return asset_ids, weights
+
+
 class PortfolioShareStore:
     def __init__(self, share_dir):
         self.share_dir = share_dir
@@ -2539,9 +2558,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             if self.path.startswith("/api/") and not require_api_key(self):
                 return
             if self.path == "/api/backtest":
-                assets = payload.get("assets", [])
-                asset_ids = [item["id"] for item in assets]
-                weights = [float(item.get("weight", 0)) for item in assets]
+                asset_ids, weights = parse_payload_assets(payload.get("assets", []))
                 result = backtest_portfolio(
                     asset_ids,
                     weights,
@@ -2552,8 +2569,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 json_response(self, result)
                 return
             if self.path == "/api/optimize":
-                assets = payload.get("assets", [])
-                asset_ids = [item["id"] for item in assets]
+                asset_ids, _ = parse_payload_assets(payload.get("assets", []))
                 result = optimize_portfolio(
                     asset_ids,
                     payload.get("start") or None,
