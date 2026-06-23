@@ -1424,6 +1424,20 @@ function defaultFavoriteName() {
     .join(" / ");
 }
 
+function resultTitleFromAssets(result = state.result) {
+  const currentWeightsById = new Map(state.assets.map((asset) => [String(asset.id || "").toUpperCase(), Number(asset.weight || 0)]));
+  return (result?.assets || state.assets)
+    .map((asset, index) => {
+      const id = asset.id || state.assets[index]?.id || "";
+      const rawWeight = Number.isFinite(Number(asset.weight))
+        ? Number(asset.weight)
+        : Number(currentWeightsById.get(String(id).toUpperCase()) ?? state.assets[index]?.weight ?? 0);
+      const weightPct = rawWeight > 0 && rawWeight <= 1 ? rawWeight * 100 : rawWeight;
+      return `${id} ${Math.round(weightPct)}%`;
+    })
+    .join(" / ");
+}
+
 function currentFavoriteSnapshot(name) {
   return {
     id: String(Date.now()),
@@ -1827,15 +1841,25 @@ async function copyShareLink() {
 
 function sharedResultFromPortfolio(portfolio) {
   const result = portfolio?.result;
+  const portfolioWeightsById = new Map(
+    (portfolio?.assets || []).map((asset) => [String(asset.id || "").toUpperCase(), Number(asset.weight || 0)]),
+  );
+  const mergeSharedAssetWeights = (assets = []) =>
+    assets.map((asset) => {
+      const id = String(asset.id || "").toUpperCase();
+      const portfolioWeight = portfolioWeightsById.get(id);
+      return {
+        ...asset,
+        id: asset.id || id,
+        weight: Number.isFinite(Number(asset.weight)) ? Number(asset.weight) : Number(portfolioWeight || 0),
+      };
+    });
   if (!result?.dates?.length || !result?.nav?.length || !result?.drawdowns?.length) {
     const legacyCurve = (portfolio?.curve || [])
       .map((point) => ({ date: point.date, value: Number(point.value) }))
       .filter((point) => point.date && Number.isFinite(point.value));
     if (legacyCurve.length < 2) return null;
-    const legacyAssets = (portfolio.assets || []).map((asset) => ({
-      ...asset,
-      weight: Number(asset.weight || 0) / 100,
-    }));
+    const legacyAssets = mergeSharedAssetWeights(portfolio.assets || []);
     return {
       assets: legacyAssets,
       dates: legacyCurve.map((point) => point.date),
@@ -1852,8 +1876,8 @@ function sharedResultFromPortfolio(portfolio) {
   }
   return {
     assets: result.assets?.length
-      ? result.assets
-      : (portfolio.assets || []).map((asset) => ({ ...asset, weight: Number(asset.weight || 0) / 100 })),
+      ? mergeSharedAssetWeights(result.assets)
+      : mergeSharedAssetWeights(portfolio.assets || []),
     dates: result.dates,
     nav: result.nav,
     drawdowns: result.drawdowns,
@@ -2893,9 +2917,7 @@ function renderMetrics() {
   els.rangeLabel.textContent = `${rangeText}${drawdownRangeText}`;
   els.chartTitle.textContent = state.shareView.active && state.shareView.portfolio?.name
     ? state.shareView.portfolio.name
-    : state.result.assets
-      .map((asset) => `${asset.id} ${Math.round(asset.weight * 100)}%`)
-      .join(" / ");
+    : resultTitleFromAssets(state.result);
 }
 
 function renderCorrelation() {
