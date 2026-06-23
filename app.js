@@ -2954,6 +2954,7 @@ async function addProfileToComparison(profile) {
   try {
     const result = await fetchComparisonResult(config);
     state.comparison.items.push(comparisonItemFromConfig(config, result));
+    resetComparisonView();
     renderAll();
   } catch (error) {
     renderComparisonPanel(error.message || t("requestFailed"));
@@ -2984,6 +2985,7 @@ async function addOptimizerProfilesToComparison(inputProfiles) {
       if (state.comparison.items.some((item) => item.key === key)) continue;
       const result = await fetchComparisonResult(config);
       state.comparison.items.push(comparisonItemFromConfig(config, result));
+      resetComparisonView();
       renderAll();
     }
   } catch (error) {
@@ -3136,6 +3138,7 @@ async function submitComparisonEditor() {
     } else {
       state.comparison.items.push(item);
     }
+    resetComparisonView();
     closeComparisonEditor();
     renderAll();
     renderOptimizer(state.optimizerProfiles);
@@ -3196,6 +3199,7 @@ function removeComparisonItem(key) {
     exitComparisonMode();
     return;
   }
+  resetComparisonView();
   renderAll();
   renderOptimizer(state.optimizerProfiles);
 }
@@ -3624,9 +3628,64 @@ function canvasGeometry() {
 
 function chartResultForView() {
   if (isComparisonMode()) {
-    return comparisonEntries()[0]?.result || state.result;
+    const dates = comparisonDateAxis(comparisonEntries());
+    if (!dates.length) return state.result;
+    return {
+      dates,
+      nav: dates.map(() => 1),
+      drawdowns: dates.map(() => 0),
+      metrics: {},
+    };
   }
   return state.result;
+}
+
+function comparisonDateAxis(entries = visibleComparisonEntries()) {
+  const dates = new Set();
+  entries.forEach((entry) => {
+    (entry.result?.dates || []).forEach((date) => dates.add(date));
+  });
+  return Array.from(dates).sort();
+}
+
+function resetComparisonView() {
+  if (!isComparisonMode()) return;
+  const dates = comparisonDateAxis(comparisonEntries());
+  state.view = dates.length ? { start: 0, end: dates.length - 1 } : null;
+}
+
+function alignedSeriesForDates(result, dates) {
+  const sourceDates = result?.dates || [];
+  const sourceValues = result?.nav || [];
+  if (!sourceDates.length || !sourceValues.length || !dates.length) return dates.map(() => null);
+  const firstDate = sourceDates[0];
+  const lastDate = sourceDates[sourceDates.length - 1];
+  let sourceIndex = 0;
+  let lastValue = null;
+  return dates.map((date) => {
+    while (sourceIndex < sourceDates.length && sourceDates[sourceIndex] <= date) {
+      lastValue = sourceValues[sourceIndex];
+      sourceIndex += 1;
+    }
+    if (date < firstDate || date > lastDate) return null;
+    return lastValue;
+  });
+}
+
+function resultValueOnDate(result, date) {
+  const sourceDates = result?.dates || [];
+  const sourceValues = result?.nav || [];
+  if (!sourceDates.length || !sourceValues.length || date < sourceDates[0] || date > sourceDates[sourceDates.length - 1]) {
+    return null;
+  }
+  let left = 0;
+  let right = sourceDates.length - 1;
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    if (sourceDates[mid] <= date) left = mid + 1;
+    else right = mid - 1;
+  }
+  return right >= 0 ? sourceValues[right] : null;
 }
 
 function getViewData() {
@@ -3665,6 +3724,7 @@ function renderChart() {
   const allCompareEntries = compareMode ? comparisonEntries() : [];
   const compareEntries = compareMode ? visibleComparisonEntries() : [];
   const viewResult = compareMode && compareEntries[0] ? compareEntries[0].result : state.result;
+  const chartViewResult = compareMode ? chartResultForView() : viewResult;
   const drawdownHeight = compareMode ? 0 : 80;
   const drawdownBottomMargin = 20;
   const drawdownTop = cssHeight - drawdownBottomMargin - drawdownHeight;
@@ -3672,19 +3732,19 @@ function renderChart() {
   const plotW = cssWidth - pad.left - pad.right;
   const plotH = cssHeight - pad.top - pad.bottom;
   const { start, end } = getViewData();
-  const nav = viewResult.nav.slice(start, end + 1);
-  const drawdowns = viewResult.drawdowns.slice(start, end + 1);
-  const dates = viewResult.dates.slice(start, end + 1);
+  const nav = chartViewResult.nav.slice(start, end + 1);
+  const drawdowns = chartViewResult.drawdowns.slice(start, end + 1);
+  const dates = chartViewResult.dates.slice(start, end + 1);
   const full = viewResult.metrics;
   els.rangeLabel.textContent = compareMode
-    ? `${t("compareMode")} · ${t("currentView")} ${viewResult.dates[start]} ${t("to")} ${viewResult.dates[end]}`
+    ? `${t("compareMode")} · ${t("currentView")} ${chartViewResult.dates[start]} ${t("to")} ${chartViewResult.dates[end]}`
     : `${t("currentView")} ${viewResult.dates[start]} ${t("to")} ${viewResult.dates[end]} · ${t("fullRangeMaxDrawdown")} ${full.drawdownPeak} ${t("to")} ${full.drawdownTrough}`;
   const assetSeries = compareMode ? [] : state.result.assetSeries.map((series) => series.slice(start, end + 1));
   const portfolioVisible = state.visibleSeries.portfolio !== false;
   const visibleAssetSeries = compareMode
     ? []
     : assetSeries.filter((_, idx) => state.visibleSeries.assets[state.result.assets[idx].id] !== false);
-  const compareSeries = compareEntries.map((entry) => entry.result.nav.slice(start, end + 1));
+  const compareSeries = compareEntries.map((entry) => alignedSeriesForDates(entry.result, dates));
   const valueSeries = compareMode
     ? compareSeries
     : [...(portfolioVisible ? [nav] : []), ...visibleAssetSeries];
@@ -3720,6 +3780,7 @@ function renderChart() {
   const x = (i) => pad.left + (i / Math.max(1, nav.length - 1)) * plotW;
   const y = (value) => pad.top + (1 - (scaleValue(value) - plotMin) / (plotMax - plotMin)) * plotH;
   const targetPlotPoints = Math.max(32, Math.floor(plotW / 2));
+  const isFinitePointValue = (value) => Number.isFinite(Number(value));
   const samplePlotPoints = (series, mode = "average") => {
     if (series.length <= targetPlotPoints * 1.25) {
       return series.map((value, i) => ({ i, value }));
@@ -3730,15 +3791,21 @@ function renderChart() {
       const startIdx = Math.max(1, Math.floor(bucket * bucketSize));
       const endIdx = Math.min(series.length - 2, Math.floor((bucket + 1) * bucketSize));
       if (endIdx < startIdx) continue;
-      let value = series[startIdx];
+      const bucketValues = [];
+      for (let i = startIdx; i <= endIdx; i++) {
+        if (isFinitePointValue(series[i])) bucketValues.push(Number(series[i]));
+      }
+      if (!bucketValues.length) {
+        points.push({ i: Math.round((startIdx + endIdx) / 2), value: null });
+        continue;
+      }
+      let value = bucketValues[0];
       if (mode === "min") {
-        for (let i = startIdx + 1; i <= endIdx; i++) value = Math.min(value, series[i]);
+        for (const candidate of bucketValues) value = Math.min(value, candidate);
       } else if (mode === "max") {
-        for (let i = startIdx + 1; i <= endIdx; i++) value = Math.max(value, series[i]);
+        for (const candidate of bucketValues) value = Math.max(value, candidate);
       } else {
-        let total = 0;
-        for (let i = startIdx; i <= endIdx; i++) total += series[i];
-        value = total / (endIdx - startIdx + 1);
+        value = bucketValues.reduce((total, candidate) => total + candidate, 0) / bucketValues.length;
       }
       points.push({ i: Math.round((startIdx + endIdx) / 2), value });
     }
@@ -3746,9 +3813,18 @@ function renderChart() {
     return points;
   };
   const drawSampledSeries = (series, valueToY = y, mode = "average") => {
+    let active = false;
     samplePlotPoints(series, mode).forEach((point, idx) => {
-      if (idx === 0) ctx.moveTo(x(point.i), valueToY(point.value));
-      else ctx.lineTo(x(point.i), valueToY(point.value));
+      if (!isFinitePointValue(point.value)) {
+        active = false;
+        return;
+      }
+      if (!active) {
+        ctx.moveTo(x(point.i), valueToY(point.value));
+        active = true;
+      } else {
+        ctx.lineTo(x(point.i), valueToY(point.value));
+      }
     });
   };
   const localHoverIndex =
@@ -3914,7 +3990,10 @@ function renderChart() {
 
   if (localHoverIndex !== null && !state.selection) {
     const hx = x(localHoverIndex);
-    const hoverValue = state.visibleSeries.portfolio === false ? nav[localHoverIndex] : nav[localHoverIndex];
+    const compareHoverSeries = compareMode
+      ? compareSeries.find((series) => isFinitePointValue(series[localHoverIndex]))
+      : null;
+    const hoverValue = compareHoverSeries ? compareHoverSeries[localHoverIndex] : nav[localHoverIndex];
     const hy = y(hoverValue);
     ctx.save();
     ctx.setLineDash([4, 4]);
@@ -3964,6 +4043,10 @@ function showTooltip(event) {
   state.hoverIndex = idx;
   const viewResult = chartResultForView();
   const date = viewResult.dates[idx];
+  if (!date) {
+    hideTooltip();
+    return;
+  }
   const nav = viewResult.nav[idx];
   const dd = viewResult.drawdowns[idx];
   const weights = state.result?.weightsTimeline[idx] || [];
@@ -3972,7 +4055,10 @@ function showTooltip(event) {
     els.tooltip.innerHTML = `
       <strong>${date}</strong><br>
       ${entries
-        .map((entry) => `${escapeHtml(comparisonDisplayTitle(entry))} ${fmtNum(entry.result.nav[idx], 3)}`)
+        .map((entry) => {
+          const value = resultValueOnDate(entry.result, date);
+          return `${escapeHtml(comparisonDisplayTitle(entry))} ${Number.isFinite(value) ? fmtNum(value, 3) : "--"}`;
+        })
         .join("<br>")}
     `;
   } else {
