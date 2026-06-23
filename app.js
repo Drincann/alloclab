@@ -306,7 +306,7 @@ const I18N = {
     exitCompare: "退出对比",
     compareMode: "对比模式",
     comparisonViewMode: "展示口径",
-    comparisonBranchMode: "树杈",
+    comparisonBranchMode: "接续净值",
     comparisonOverlapMode: "共同起点",
     currentPortfolio: "当前组合",
     compareTableTitle: "组合对比",
@@ -528,7 +528,7 @@ const I18N = {
     exitCompare: "Exit Compare",
     compareMode: "Compare mode",
     comparisonViewMode: "View",
-    comparisonBranchMode: "Branch",
+    comparisonBranchMode: "Linked NAV",
     comparisonOverlapMode: "Common start",
     currentPortfolio: "Current portfolio",
     compareTableTitle: "Portfolio comparison",
@@ -3826,6 +3826,14 @@ function comparisonChartDates(entries = comparisonEntries()) {
   return comparisonAnchorEntry(validEntries)?.result?.dates || comparisonDateAxis(validEntries);
 }
 
+function isValidNavValue(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function isFiniteSeriesValue(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
 function resetComparisonView() {
   if (!isComparisonMode()) return;
   const dates = comparisonChartDates(comparisonEntries());
@@ -3853,24 +3861,20 @@ function alignedSeriesForDates(result, dates) {
 function comparisonSeriesForEntry(entry, dates, entries = comparisonEntries()) {
   const rawSeries = alignedSeriesForDates(entry.result, dates);
   if (comparisonViewMode() === "overlap") {
-    const base = rawSeries.find((value) => Number.isFinite(Number(value)) && Number(value) > 0);
-    return rawSeries.map((value) => (Number.isFinite(Number(value)) && base ? Number(value) / base : null));
+    const base = rawSeries.find((value) => isValidNavValue(value));
+    return rawSeries.map((value) => (isValidNavValue(value) && base ? Number(value) / base : null));
   }
   const anchor = comparisonAnchorEntry(entries);
   if (!anchor || anchor.key === entry.key) return rawSeries;
   const anchorSeries = alignedSeriesForDates(anchor.result, dates);
   const branchIndex = rawSeries.findIndex(
-    (value, index) =>
-      Number.isFinite(Number(value)) &&
-      Number(value) > 0 &&
-      Number.isFinite(Number(anchorSeries[index])) &&
-      Number(anchorSeries[index]) > 0,
+    (value, index) => isValidNavValue(value) && isValidNavValue(anchorSeries[index]),
   );
   if (branchIndex < 0) return dates.map(() => null);
   const ownBase = Number(rawSeries[branchIndex]);
   const anchorBase = Number(anchorSeries[branchIndex]);
   return rawSeries.map((value, index) => {
-    if (index < branchIndex || !Number.isFinite(Number(value)) || ownBase <= 0) return null;
+    if (index < branchIndex || !isValidNavValue(value) || ownBase <= 0) return null;
     return anchorBase * (Number(value) / ownBase);
   });
 }
@@ -3983,7 +3987,7 @@ function renderChart() {
   const x = (i) => pad.left + (i / Math.max(1, nav.length - 1)) * plotW;
   const y = (value) => pad.top + (1 - (scaleValue(value) - plotMin) / (plotMax - plotMin)) * plotH;
   const targetPlotPoints = Math.max(32, Math.floor(plotW / 2));
-  const isFinitePointValue = (value) => Number.isFinite(Number(value));
+  const isFinitePointValue = (value) => isFiniteSeriesValue(value);
   const samplePlotPoints = (series, mode = "average") => {
     const validIndexes = series
       .map((value, index) => (isFinitePointValue(value) ? index : -1))
