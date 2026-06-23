@@ -3991,11 +3991,12 @@ function renderChart() {
     if (!validIndexes.length) return [];
     const firstValid = validIndexes[0];
     const lastValid = validIndexes[validIndexes.length - 1];
-    if (series.length <= targetPlotPoints * 1.25) {
-      return series.map((value, i) => ({ i, value })).filter((point) => isFinitePointValue(point.value));
+    if (validIndexes.length <= targetPlotPoints * 1.25) {
+      return validIndexes.map((i) => ({ i, value: series[i] }));
     }
     const points = [{ i: firstValid, value: series[firstValid] }];
     const bucketSize = (lastValid - firstValid) / Math.max(1, targetPlotPoints - 1);
+    let lastPointIndex = firstValid;
     for (let bucket = 1; bucket < targetPlotPoints - 1; bucket++) {
       const startIdx = Math.max(firstValid + 1, Math.floor(firstValid + bucket * bucketSize));
       const endIdx = Math.min(lastValid - 1, Math.floor(firstValid + (bucket + 1) * bucketSize));
@@ -4013,9 +4014,12 @@ function renderChart() {
       } else {
         value = bucketValues.reduce((total, candidate) => total + candidate, 0) / bucketValues.length;
       }
-      points.push({ i: Math.round((startIdx + endIdx) / 2), value });
+      const pointIndex = Math.round((startIdx + endIdx) / 2);
+      if (pointIndex <= lastPointIndex) continue;
+      points.push({ i: pointIndex, value });
+      lastPointIndex = pointIndex;
     }
-    points.push({ i: lastValid, value: series[lastValid] });
+    if (lastValid > lastPointIndex) points.push({ i: lastValid, value: series[lastValid] });
     return points;
   };
   const drawSampledSeries = (series, valueToY = y, mode = "average") => {
