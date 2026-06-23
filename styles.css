@@ -1058,6 +1058,18 @@ h2 {
   color: var(--button-text);
 }
 
+.ghost-btn.danger-btn {
+  border-color: color-mix(in srgb, var(--danger) 44%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, var(--button-bg));
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.ghost-btn.danger-btn:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, var(--button-bg));
+}
+
 .search-box {
   position: relative;
   margin-top: 12px;

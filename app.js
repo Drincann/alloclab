@@ -3031,6 +3031,7 @@ function exitComparisonMode() {
   renderChart();
   renderLegend();
   renderOptimizer(state.optimizerProfiles);
+  updateAddCurrentCompareButton();
 }
 
 function clearComparisonForEdit() {
@@ -5130,8 +5131,10 @@ function refreshOptimizerCompareButtons() {
 function updateAddCurrentCompareButton() {
   if (!els.addCurrentCompareBtn) return;
   const busy = state.loading || state.optimizing || Boolean(state.comparison.pendingKey) || state.comparison.pendingAll;
-  els.addCurrentCompareBtn.textContent = t("newCompareItem");
-  els.addCurrentCompareBtn.disabled = busy;
+  const compareMode = isComparisonMode();
+  els.addCurrentCompareBtn.textContent = compareMode ? t("exitCompare") : t("newCompareItem");
+  els.addCurrentCompareBtn.classList.toggle("danger-btn", compareMode);
+  els.addCurrentCompareBtn.disabled = compareMode ? state.loading : busy;
 }
 
 function bindEvents() {
@@ -5271,7 +5274,14 @@ function bindEvents() {
     ensureOverlayScrollbars();
   });
   els.compareAllBtn.addEventListener("click", addAllProfilesToComparison);
-  els.addCurrentCompareBtn.addEventListener("click", addCurrentToComparison);
+  els.addCurrentCompareBtn.addEventListener("click", () => {
+    if (isComparisonMode()) {
+      exitComparisonMode();
+      updateAddCurrentCompareButton();
+      return;
+    }
+    addCurrentToComparison();
+  });
   els.resetZoomBtn.addEventListener("click", () => {
     if (!state.result || state.loading) return;
     if (isComparisonMode() || state.shareView.active) {
