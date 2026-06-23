@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -96,6 +96,26 @@ CATALOG = [
         "currency": "USD",
         "hintStart": "2002-07-30",
         "keywords": "treasury long bond tlt 美债 长债",
+    },
+    {
+        "id": "CASH",
+        "symbol": "CASH",
+        "name": "Synthetic cash (0% return)",
+        "assetClass": "Cash",
+        "source": "cash",
+        "currency": "USD",
+        "hintStart": "1900-01-01",
+        "keywords": "cash usd money market 现金 美元现金 0收益",
+    },
+    {
+        "id": "CNYCASH",
+        "symbol": "CNYCASH",
+        "name": "合成现金（0收益）",
+        "assetClass": "Cash",
+        "source": "cash",
+        "currency": "CNY",
+        "hintStart": "1900-01-01",
+        "keywords": "cash cny money market 现金 人民币现金 0收益",
     },
     {
         "id": "H30269",
@@ -1042,6 +1062,16 @@ def get_asset_meta(asset_id):
     return CATALOG_BY_ID.get(asset_id) or get_dynamic_yahoo_meta(asset_id) or get_dynamic_fund_meta(asset_id)
 
 
+def synthetic_cash_series():
+    rows = []
+    current = datetime(1900, 1, 1, tzinfo=timezone.utc).date()
+    end = datetime.now(timezone.utc).date()
+    while current <= end:
+        rows.append({"date": current.isoformat(), "close": 1.0})
+        current += timedelta(days=1)
+    return rows
+
+
 def data_availability_reason(meta):
     if meta.get("hintStart") == DATA_UNAVAILABLE_HINT:
         return DATA_UNAVAILABLE_REASON
@@ -1430,6 +1460,8 @@ def get_series(asset_id, force_refresh=False):
         rows = fetch_fund_nav(meta["symbol"], "LJJZ")
     elif source == "sina":
         rows = fetch_sina(meta["symbol"])
+    elif source == "cash":
+        rows = synthetic_cash_series()
     else:
         raise ValueError(f"暂不支持的数据源：{source}")
 
