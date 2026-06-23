@@ -2149,46 +2149,158 @@ def clean_share_catalog(raw_catalog, assets):
     return catalog
 
 
-def sampled_share_curve(dates, nav, limit=96):
+def clean_share_number(value, fallback=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if math.isfinite(number) else fallback
+
+
+def clean_share_number_list(values, limit=12000):
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    for value in values[:limit]:
+        number = clean_share_number(value)
+        if number is None:
+            return []
+        cleaned.append(number)
+    return cleaned
+
+
+def clean_share_date_list(values, limit=12000):
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    for value in values[:limit]:
+        date = clean_share_date(value)
+        if not date:
+            return []
+        cleaned.append(date)
+    return cleaned
+
+
+def clean_share_metrics(raw_metrics):
+    if not isinstance(raw_metrics, dict):
+        return {}
+    cleaned = {}
+    for key, value in raw_metrics.items():
+        if key in {"start", "end", "drawdownPeak", "drawdownTrough"}:
+            cleaned[key] = clean_share_text(value, limit=16)
+        elif key == "withdrawal4" and isinstance(value, dict):
+            cleaned[key] = {
+                "cagr": clean_share_number(value.get("cagr")),
+                "terminal": clean_share_number(value.get("terminal")),
+                "depleted": bool(value.get("depleted")),
+                "depletedDate": clean_share_text(value.get("depletedDate"), limit=16),
+            }
+        else:
+            number = clean_share_number(value)
+            if number is not None:
+                cleaned[key] = number
+    return cleaned
+
+
+def clean_share_rebalance_events(raw_events, asset_count, limit=2000):
+    if not isinstance(raw_events, list):
+        return []
+    events = []
+    for raw in raw_events[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        before = clean_share_number_list(raw.get("before"), asset_count)
+        if len(before) != asset_count:
+            continue
+        events.append(
+            {
+                "date": clean_share_date(raw.get("date")),
+                "nav": clean_share_number(raw.get("nav"), 0),
+                "before": before,
+            }
+        )
+    return [event for event in events if event["date"]]
+
+
+def clean_share_correlation(raw_correlation, asset_count):
+    if not isinstance(raw_correlation, list):
+        return []
+    matrix = []
+    for row in raw_correlation[:asset_count]:
+        values = clean_share_number_list(row, asset_count)
+        if len(values) != asset_count:
+            return []
+        matrix.append(values)
+    return matrix if len(matrix) == asset_count else []
+
+
+def clean_share_asset_series(raw_series, asset_count, date_count):
+    if not isinstance(raw_series, list):
+        return []
+    series = []
+    for row in raw_series[:asset_count]:
+        values = clean_share_number_list(row, date_count)
+        if len(values) != date_count:
+            return []
+        series.append(values)
+    return series if len(series) == asset_count else []
+
+
+def clean_share_result(raw_result, assets):
+    if not isinstance(raw_result, dict):
+        return None
+    dates = clean_share_date_list(raw_result.get("dates"))
+    nav = clean_share_number_list(raw_result.get("nav"), len(dates))
+    drawdowns = clean_share_number_list(raw_result.get("drawdowns"), len(dates))
+    if not dates or len(nav) != len(dates) or len(drawdowns) != len(dates):
+        return None
+    result_assets = clean_share_catalog(raw_result.get("assets"), assets)
+    if not result_assets:
+        result_assets = clean_share_catalog(raw_result.get("catalog"), assets)
+    if not result_assets:
+        result_assets = [{**asset, "weight": asset["weight"] / 100} for asset in assets]
+    asset_count = len(assets)
+    result = {
+        "assets": result_assets,
+        "dates": dates,
+        "nav": nav,
+        "drawdowns": drawdowns,
+        "weightsTimeline": [],
+        "rebalanceEvents": clean_share_rebalance_events(raw_result.get("rebalanceEvents"), asset_count),
+        "metrics": clean_share_metrics(raw_result.get("metrics")),
+        "correlation": clean_share_correlation(raw_result.get("correlation"), asset_count),
+        "assetSeries": clean_share_asset_series(raw_result.get("assetSeries"), asset_count, len(dates)),
+        "assetStats": [],
+    }
+    return result
+
+
+def sampled_share_curve_from_result(result, limit=160):
+    if not result:
+        return []
+    dates = result.get("dates") or []
+    nav = result.get("nav") or []
     if not dates or not nav:
         return []
     if len(dates) <= limit:
         indexes = range(len(dates))
     else:
         indexes = sorted({round(i * (len(dates) - 1) / (limit - 1)) for i in range(limit)})
-    return [
-        {
-            "date": dates[index],
-            "value": nav[index],
-        }
-        for index in indexes
-    ]
+    return [{"date": dates[index], "value": nav[index]} for index in indexes]
 
 
-def share_profile_from_backtest(portfolio):
-    try:
-        result = backtest_portfolio(
-            [asset["id"] for asset in portfolio["assets"]],
-            [asset["weight"] for asset in portfolio["assets"]],
-            portfolio["rebalance"],
-            portfolio.get("start") or None,
-            portfolio.get("end") or None,
-        )
-        metrics = result["metrics"]
-        return {
-            "start": metrics.get("start", ""),
-            "end": metrics.get("end", ""),
-            "cagr": metrics.get("cagr"),
-            "totalReturn": metrics.get("totalReturn"),
-            "maxDrawdown": metrics.get("maxDrawdown"),
-            "volatility": metrics.get("volatility"),
-            "sharpe0": metrics.get("sharpe0"),
-            "calmar": metrics.get("calmar"),
-            "averageNav": metrics.get("averageNav"),
-            "years": metrics.get("years"),
-        }, result.get("assets", []), sampled_share_curve(result.get("dates", []), result.get("nav", []))
-    except Exception:
-        return None, [], []
+def clean_share_curve(raw_curve, limit=12000):
+    if not isinstance(raw_curve, list):
+        return []
+    curve = []
+    for raw in raw_curve[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        date = clean_share_date(raw.get("date"))
+        value = clean_share_number(raw.get("value"))
+        if date and value is not None:
+            curve.append({"date": date, "value": value})
+    return curve
 
 
 def clean_share_portfolio(raw_portfolio):
@@ -2196,20 +2308,25 @@ def clean_share_portfolio(raw_portfolio):
     assets = clean_share_assets(raw_portfolio.get("assets"))
     portfolio = {
         "name": clean_share_text(raw_portfolio.get("name"), "Shared Portfolio"),
-        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "createdAt": clean_share_text(raw_portfolio.get("createdAt"), "", 32)
+        or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "assets": assets,
         "rebalance": clean_share_rebalance(raw_portfolio.get("rebalance")),
         "start": clean_share_date(raw_portfolio.get("start")),
         "end": clean_share_date(raw_portfolio.get("end")),
         "catalog": clean_share_catalog(raw_portfolio.get("catalog"), assets),
     }
-    metrics, result_assets, curve = share_profile_from_backtest(portfolio)
-    if metrics:
-        portfolio["metrics"] = metrics
-    if curve:
-        portfolio["curve"] = curve
-    if result_assets:
-        portfolio["catalog"] = clean_share_catalog(result_assets, assets) or portfolio["catalog"]
+    result = clean_share_result(raw_portfolio.get("result"), assets)
+    if result:
+        portfolio["result"] = result
+        portfolio["metrics"] = result.get("metrics", {})
+        portfolio["curve"] = sampled_share_curve_from_result(result)
+        portfolio["catalog"] = clean_share_catalog(result.get("assets"), assets) or portfolio["catalog"]
+    else:
+        portfolio["metrics"] = clean_share_metrics(raw_portfolio.get("metrics"))
+        curve = clean_share_curve(raw_portfolio.get("curve"))
+        if curve:
+            portfolio["curve"] = curve
     return portfolio
 
 
@@ -2217,9 +2334,20 @@ def json_response(handler, payload, status=200):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    add_share_cors_headers(handler)
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def add_share_cors_headers(handler):
+    parsed = urllib.parse.urlparse(handler.path)
+    if parsed.path != "/api/share":
+        return
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Key, Authorization")
+    handler.send_header("Access-Control-Max-Age", "86400")
 
 
 def access_key():
@@ -2311,11 +2439,25 @@ class AppHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[server] {self.address_string()} - {format % args}")
 
+    def do_OPTIONS(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/share":
+            self.send_response(204)
+            add_share_cors_headers(self)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         try:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path in ("", "/", "/index.html"):
                 serve_index(self)
+                return
+            if parsed.path == "/api/share":
+                token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0].strip()
+                json_response(self, {"portfolio": SHARE_STORE.read(token)})
                 return
             if parsed.path.startswith("/api/") and not require_api_key(self):
                 return
@@ -2325,10 +2467,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/catalog":
                 json_response(self, {"items": [public_asset_meta(enrich_asset_market_profile(item)) for item in CATALOG]})
-                return
-            if parsed.path == "/api/share":
-                token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0].strip()
-                json_response(self, {"portfolio": SHARE_STORE.read(token)})
                 return
             super().do_GET()
         except ValueError as exc:

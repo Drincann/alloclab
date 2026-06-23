@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AllocLab</title>
-    <link rel="stylesheet" href="/styles.css?v=20260616-seed" />
+    <link rel="stylesheet" href="/styles.css?v=20260623-share-snapshot" />
   </head>
   <body>
     <div id="authOverlay" class="auth-overlay">
@@ -148,6 +148,7 @@
           </div>
           <div class="chart-action-group">
             <button id="addCurrentCompareBtn" type="button" class="ghost-btn" data-i18n="newCompareItem">新增组合</button>
+            <button id="applySharedBtn" type="button" class="primary-btn" data-i18n="applyCurrentPortfolio">应用当前组合</button>
             <button id="resetZoomBtn" type="button" class="ghost-btn" data-i18n="resetRange">重置区间</button>
           </div>
         </div>
@@ -211,6 +212,13 @@
           <span data-i18n="portfolioName">组合名称</span>
           <input id="shareNameInput" type="text" />
         </label>
+        <details id="shareAdvanced" class="share-advanced">
+          <summary data-i18n="shareAdvanced">高级配置</summary>
+          <label class="share-host-row">
+            <span data-i18n="shareHost">发布地址</span>
+            <input id="shareHostInput" type="text" placeholder="当前页面地址" data-i18n-placeholder="shareHostPlaceholder" />
+          </label>
+        </details>
         <div class="share-hero">
           <div id="sharePrimaryMetric" class="share-primary-metric"></div>
           <canvas id="shareCurveCanvas" width="520" height="160"></canvas>
@@ -273,6 +281,6 @@
         </div>
       </form>
     </div>
-    <script src="/app.js?v=20260616-seed"></script>
+    <script src="/app.js?v=20260623-share-snapshot"></script>
   </body>
 </html>

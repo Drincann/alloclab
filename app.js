@@ -19,6 +19,7 @@ const state = {
   optimizerCollapsed: false,
   optimizerSelectedKeys: [],
   optimizerFocusedKey: "",
+  optimizerHighlightedKey: "",
   optimizerSortKey: "composite",
   optimizerSortDirection: "desc",
   optimizerTagFilter: "",
@@ -33,6 +34,10 @@ const state = {
   theme: "light",
   themePreference: "system",
   shareDialog: null,
+  shareView: {
+    active: false,
+    portfolio: null,
+  },
   comparison: {
     active: false,
     items: [],
@@ -83,6 +88,7 @@ const els = {
   optimizerLimitInput: document.getElementById("optimizerLimitInput"),
   optimizerResults: document.getElementById("optimizerResults"),
   addCurrentCompareBtn: document.getElementById("addCurrentCompareBtn"),
+  applySharedBtn: document.getElementById("applySharedBtn"),
   resetZoomBtn: document.getElementById("resetZoomBtn"),
   comparisonPanel: document.getElementById("comparisonPanel"),
   chartScaleModes: document.getElementById("chartScaleModes"),
@@ -94,6 +100,8 @@ const els = {
   shareSubtitle: document.getElementById("shareSubtitle"),
   shareNameRow: document.getElementById("shareNameRow"),
   shareNameInput: document.getElementById("shareNameInput"),
+  shareAdvanced: document.getElementById("shareAdvanced"),
+  shareHostInput: document.getElementById("shareHostInput"),
   sharePrimaryMetric: document.getElementById("sharePrimaryMetric"),
   shareCurveCanvas: document.getElementById("shareCurveCanvas"),
   shareSummary: document.getElementById("shareSummary"),
@@ -174,7 +182,7 @@ const I18N = {
     normalize: "归一化",
     favorites: "收藏组合",
     save: "保存",
-    share: "分享",
+    share: "发布分享",
     sharePreview: "发布分享",
     sharedViewTitle: "组合详情",
     shareReady: "分享链接已生成",
@@ -184,15 +192,20 @@ const I18N = {
     copied: "已复制",
     close: "关闭",
     applyToView: "应用到当前视图",
+    applyCurrentPortfolio: "应用当前组合",
     createShareLink: "生成分享链接",
     creatingShareLink: "生成中",
     sharedPortfolio: "分享组合",
     portfolioName: "组合名称",
+    shareAdvanced: "高级配置",
+    shareHost: "发布地址",
+    shareHostPlaceholder: "当前页面地址",
     portfolioWeights: "组合比例",
     weights: "权重",
     shareDraftHint: "确认展示效果后生成链接",
     shareCreatedHint: "复制链接后发给别人",
     createShareFailed: "生成分享链接失败",
+    invalidShareHost: "发布地址无效",
     loadShareFailed: "分享链接读取失败",
     noShareMetrics: "暂无回测指标",
     favoriteName: "组合名称",
@@ -383,7 +396,7 @@ const I18N = {
     normalize: "Normalize",
     favorites: "Saved portfolios",
     save: "Save",
-    share: "Share",
+    share: "Publish",
     sharePreview: "Publish Share",
     sharedViewTitle: "Portfolio Details",
     shareReady: "Share Link Ready",
@@ -393,15 +406,20 @@ const I18N = {
     copied: "Copied",
     close: "Close",
     applyToView: "Apply to current view",
+    applyCurrentPortfolio: "Use this portfolio",
     createShareLink: "Create share link",
     creatingShareLink: "Creating",
     sharedPortfolio: "Shared portfolio",
     portfolioName: "Portfolio name",
+    shareAdvanced: "Advanced",
+    shareHost: "Publish host",
+    shareHostPlaceholder: "Current page host",
     portfolioWeights: "Weights",
     weights: "Weights",
     shareDraftHint: "Review the presentation, then create a link",
     shareCreatedHint: "Copy the link and send it",
     createShareFailed: "Failed to create share link",
+    invalidShareHost: "Invalid publish host",
     loadShareFailed: "Failed to load share link",
     noShareMetrics: "No backtest metrics yet",
     favoriteName: "Portfolio name",
@@ -919,6 +937,45 @@ function fmtMultiple(value, digits = 2) {
   return `${Number(value).toFixed(digits)}x`;
 }
 
+function niceTickStep(span, targetCount = 5) {
+  if (!Number.isFinite(span) || span <= 0) return 1;
+  const rawStep = span / Math.max(1, targetCount - 1);
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const fraction = rawStep / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  return niceFraction * magnitude;
+}
+
+function linearTicks(min, max, targetCount = 5) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return [];
+  const step = niceTickStep(max - min, targetCount);
+  const start = Math.ceil((min - step * 0.001) / step) * step;
+  const end = Math.floor((max + step * 0.001) / step) * step;
+  const ticks = [];
+  for (let value = start; value <= end + step * 0.5; value += step) {
+    if (value >= min - step * 0.001 && value <= max + step * 0.001) {
+      ticks.push(Object.is(value, -0) ? 0 : value);
+    }
+  }
+  if (ticks.length < 3) {
+    return Array.from({ length: targetCount }, (_, index) => min + ((max - min) * index) / (targetCount - 1));
+  }
+  return ticks;
+}
+
+function pctTickDigits(ticks) {
+  if (!ticks.length) return 0;
+  const sorted = [...ticks].sort((a, b) => a - b);
+  const step = sorted.slice(1).reduce((minStep, value, index) => {
+    const diff = Math.abs(value - sorted[index]);
+    return diff > 0 ? Math.min(minStep, diff) : minStep;
+  }, Infinity);
+  const pctStep = Number.isFinite(step) ? step * 100 : 1;
+  if (pctStep >= 1) return 0;
+  if (pctStep >= 0.1) return 1;
+  return 2;
+}
+
 function fmtWithdrawalCagr(metrics) {
   const withdrawal = metrics?.withdrawal4 || {};
   if (withdrawal.depleted) return t("depleted");
@@ -1072,6 +1129,16 @@ function setComparisonHidden(key, hidden) {
   }
 }
 
+function setOptimizerMapHighlight(key = "") {
+  const nextKey =
+    key && state.optimizerProfiles.some((profile) => optimizerProfileKey(profile) === key)
+      ? key
+      : "";
+  if (state.optimizerHighlightedKey === nextKey) return;
+  state.optimizerHighlightedKey = nextKey;
+  optimizerMapRedraw?.();
+}
+
 function setComparisonHighlight(key = "") {
   state.comparison.highlightedKey = key;
   document.querySelectorAll("[data-compare-key]").forEach((element) => {
@@ -1079,6 +1146,7 @@ function setComparisonHighlight(key = "") {
     element.classList.toggle("highlighted-item", active && element.tagName === "BUTTON");
     element.classList.toggle("highlighted-row", active && element.tagName === "TR");
   });
+  setOptimizerMapHighlight(key);
   renderChart();
 }
 
@@ -1193,6 +1261,7 @@ function loadSavedState() {
 }
 
 function saveState() {
+  if (state.shareView.active) return;
   try {
     const statePayload = {
       assets: state.assets.map((asset) => ({ id: asset.id, weight: Number(asset.weight || 0) })),
@@ -1232,18 +1301,7 @@ function currentFavoriteSnapshot(name) {
 function currentMetricSnapshot() {
   if (!state.result?.metrics) return null;
   const m = state.result.metrics;
-  return {
-    start: m.start || "",
-    end: m.end || "",
-    cagr: m.cagr,
-    totalReturn: m.totalReturn,
-    maxDrawdown: m.maxDrawdown,
-    volatility: m.volatility,
-    sharpe0: m.sharpe0,
-    calmar: m.calmar,
-    averageNav: m.averageNav,
-    years: m.years,
-  };
+  return { ...m };
 }
 
 function sampledCurveFromResult(result, limit = 96) {
@@ -1266,11 +1324,65 @@ function currentShareSnapshot(name = "") {
   if (metrics) snapshot.metrics = metrics;
   const curve = sampledCurveFromResult(state.result);
   if (curve.length) snapshot.curve = curve;
+  if (state.result) snapshot.result = shareResultSnapshot(state.result);
   return snapshot;
 }
 
-function shareUrlForToken(token) {
-  const url = new URL(window.location.href);
+function shareResultSnapshot(result) {
+  return {
+    assets: (result.assets || []).map((asset) => ({ ...asset })),
+    dates: [...(result.dates || [])],
+    nav: [...(result.nav || [])],
+    drawdowns: [...(result.drawdowns || [])],
+    weightsTimeline: Array.isArray(result.weightsTimeline) ? result.weightsTimeline.map((row) => [...row]) : [],
+    rebalanceEvents: (result.rebalanceEvents || []).map((event) => ({
+      date: event.date,
+      nav: Number(event.nav),
+      before: [...(event.before || [])],
+    })),
+    metrics: { ...(result.metrics || {}) },
+    correlation: (result.correlation || []).map((row) => [...row]),
+    assetSeries: (result.assetSeries || []).map((series) => [...series]),
+    assetStats: (result.assetStats || []).map((asset) => ({ ...asset })),
+  };
+}
+
+function sameSharePortfolioAsCurrent(portfolio) {
+  const assets = portfolio.assets || [];
+  if (assets.length !== state.assets.length) return false;
+  const sameAssets = assets.every(
+    (asset, index) =>
+      asset.id === state.assets[index]?.id &&
+      Math.abs(Number(asset.weight || 0) - Number(state.assets[index]?.weight || 0)) < 0.0001,
+  );
+  if (!sameAssets) return false;
+  const rebalance = portfolio.rebalance || {};
+  if ((rebalance.mode || "none") !== (state.rebalance.mode || "none")) return false;
+  if (Math.abs(Number(rebalance.threshold || 0.1) - Number(state.rebalance.threshold || 0.1)) > 0.0001) return false;
+  return (portfolio.start || "") === (els.startInput.value || "") && (portfolio.end || "") === (els.endInput.value || "");
+}
+
+function normalizeSharePublishBaseUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return window.location.origin;
+  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `${window.location.protocol}//${raw}`;
+  const url = new URL(withProtocol);
+  url.pathname = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+
+function sharePublishBaseUrl() {
+  try {
+    return normalizeSharePublishBaseUrl(els.shareHostInput?.value || "");
+  } catch {
+    throw new Error(t("invalidShareHost"));
+  }
+}
+
+function shareUrlForToken(token, baseUrl = sharePublishBaseUrl()) {
+  const url = new URL(window.location.pathname || "/", baseUrl);
   url.search = `?share=${encodeURIComponent(token)}`;
   url.hash = "";
   return url.toString();
@@ -1391,6 +1503,10 @@ function renderShareDialog() {
   if (dialog.mode === "draft" && els.shareNameInput.value !== portfolio.name) {
     els.shareNameInput.value = portfolio.name || "";
   }
+  if (els.shareAdvanced) els.shareAdvanced.style.display = dialog.mode === "draft" ? "" : "none";
+  if (els.shareHostInput) {
+    els.shareHostInput.placeholder = window.location.host;
+  }
   els.sharePrimaryMetric.innerHTML = `
     <span>${escapeHtml(t("cagr"))}</span>
     <strong>${escapeHtml(fmtPct(metrics.cagr))}</strong>
@@ -1450,13 +1566,14 @@ function closeShareDialog() {
 }
 
 async function createShare(portfolio) {
-  const data = await api("/api/share", {
+  const publishBaseUrl = sharePublishBaseUrl();
+  const data = await api(new URL("/api/share", publishBaseUrl).toString(), {
     method: "POST",
     body: JSON.stringify({ portfolio }),
   });
   return {
     portfolio: data.portfolio || portfolio,
-    url: shareUrlForToken(data.token),
+    url: shareUrlForToken(data.token, publishBaseUrl),
   };
 }
 
@@ -1477,7 +1594,17 @@ function backtestMetricsFromResult(result) {
 }
 
 async function enrichShareDraft(portfolio) {
-  if (portfolio.metrics && portfolio.curve?.length) return portfolio;
+  if (portfolio.result && portfolio.metrics && portfolio.curve?.length) return portfolio;
+  if (portfolio.metrics && portfolio.curve?.length && !state.result) return portfolio;
+  if (state.result && sameSharePortfolioAsCurrent(portfolio)) {
+    return {
+      ...portfolio,
+      metrics: currentMetricSnapshot(),
+      curve: sampledCurveFromResult(state.result),
+      result: shareResultSnapshot(state.result),
+      catalog: state.result.assets || portfolio.catalog || [],
+    };
+  }
   try {
     const result = await api("/api/backtest", {
       method: "POST",
@@ -1492,6 +1619,7 @@ async function enrichShareDraft(portfolio) {
       ...portfolio,
       metrics: backtestMetricsFromResult(result),
       curve: sampledCurveFromResult(result),
+      result: shareResultSnapshot(result),
       catalog: result.assets || portfolio.catalog || [],
     };
   } catch {
@@ -1544,12 +1672,156 @@ async function copyShareLink() {
   els.shareStatus.textContent = t("copied");
 }
 
+function sharedResultFromPortfolio(portfolio) {
+  const result = portfolio?.result;
+  if (!result?.dates?.length || !result?.nav?.length || !result?.drawdowns?.length) {
+    const legacyCurve = (portfolio?.curve || [])
+      .map((point) => ({ date: point.date, value: Number(point.value) }))
+      .filter((point) => point.date && Number.isFinite(point.value));
+    if (legacyCurve.length < 2) return null;
+    const legacyAssets = (portfolio.assets || []).map((asset) => ({
+      ...asset,
+      weight: Number(asset.weight || 0) / 100,
+    }));
+    return {
+      assets: legacyAssets,
+      dates: legacyCurve.map((point) => point.date),
+      nav: legacyCurve.map((point) => point.value),
+      drawdowns: legacyCurve.map(() => 0),
+      weightsTimeline: [],
+      rebalanceEvents: [],
+      metrics: portfolio.metrics || {},
+      correlation: [],
+      assetSeries: [],
+      assetStats: [],
+      legacyCurveOnly: true,
+    };
+  }
+  return {
+    assets: result.assets?.length
+      ? result.assets
+      : (portfolio.assets || []).map((asset) => ({ ...asset, weight: Number(asset.weight || 0) / 100 })),
+    dates: result.dates,
+    nav: result.nav,
+    drawdowns: result.drawdowns,
+    weightsTimeline: result.weightsTimeline || [],
+    rebalanceEvents: result.rebalanceEvents || [],
+    metrics: result.metrics || portfolio.metrics || {},
+    correlation: result.correlation || [],
+    assetSeries: result.assetSeries || [],
+    assetStats: result.assetStats || [],
+  };
+}
+
+function renderSharedPortfolioPage(portfolio) {
+  const result = sharedResultFromPortfolio(portfolio);
+  if (!result) {
+    showShareDialog(portfolio, { mode: "received", url: window.location.href });
+    return;
+  }
+  state.shareView = { active: true, portfolio };
+  document.body.classList.add("share-view");
+  document.title = `${portfolio.name || t("sharedPortfolio")} · ${t("sharedViewTitle")}`;
+  state.shareDialog = null;
+  state.result = result;
+  state.backtestError = null;
+  state.backtestDirty = false;
+  state.loading = false;
+  state.optimizing = false;
+  state.optimizerProfiles = [];
+  state.optimizerSummary = null;
+  state.comparison.active = false;
+  state.assets = (portfolio.assets || result.assets || []).map((asset) => ({
+    id: asset.id,
+    weight: Number(asset.weight || 0),
+  }));
+  state.rebalance = {
+    mode: portfolio.rebalance?.mode || "none",
+    threshold: Number(portfolio.rebalance?.threshold || 0.1),
+  };
+  els.startInput.value = portfolio.start || result.metrics?.start || "";
+  els.endInput.value = portfolio.end || result.metrics?.end || "";
+  els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
+  mergeCatalogItems(portfolio.catalog || result.assets || []);
+  state.view = { start: 0, end: result.dates.length - 1 };
+  state.selection = null;
+  state.hoverIndex = null;
+  state.visibleSeries = { portfolio: true, assets: {} };
+  syncVisibleSeries(result);
+  renderShareDialog();
+  renderScaleMode();
+  renderSharedPortfolioSummary();
+  renderAll();
+  updateInteractionLocks();
+}
+
+function renderSharedPortfolioSummary() {
+  let summary = document.getElementById("sharedPortfolioSummary");
+  if (!state.shareView.active) {
+    summary?.remove();
+    return;
+  }
+  if (!summary) {
+    summary = document.createElement("div");
+    summary.id = "sharedPortfolioSummary";
+    summary.className = "shared-portfolio-summary";
+  }
+  const chartControlBar = document.querySelector(".chart-control-bar");
+  if (chartControlBar && summary.nextElementSibling !== chartControlBar) {
+    chartControlBar.insertAdjacentElement("beforebegin", summary);
+  }
+  const portfolio = state.shareView.portfolio || {};
+  const resultAssetsById = new Map((state.result?.assets || []).map((asset) => [asset.id, asset]));
+  const holdingRows = (portfolio.assets || []).map((asset) => {
+    const meta = { ...assetMeta(asset.id), ...(resultAssetsById.get(asset.id) || {}) };
+    const name = meta.name && meta.name !== meta.id ? meta.name : asset.id;
+    const details = [asset.id, meta.assetClass, meta.currency].filter(Boolean).join(" · ");
+    const rawWeight = Number(asset.weight ?? meta.weight ?? 0);
+    const displayWeight = rawWeight <= 1 ? rawWeight * 100 : rawWeight;
+    return `
+      <div class="shared-holding-row">
+        <div>
+          <strong>${escapeHtml(name)}</strong>
+          <span>${escapeHtml(details)}</span>
+        </div>
+        <b>${escapeHtml(`${Math.round(displayWeight)}%`)}</b>
+      </div>
+    `;
+  });
+  const createdAt = portfolio.createdAt ? new Date(portfolio.createdAt) : null;
+  const createdText = createdAt && !Number.isNaN(createdAt.getTime()) ? createdAt.toISOString().slice(0, 10) : "";
+  summary.innerHTML = `
+    <div class="shared-portfolio-summary-head">
+      <strong>${escapeHtml(t("portfolioWeights"))}</strong>
+      <span>${escapeHtml(rebalanceLabel(portfolio.rebalance))}</span>
+      ${createdText ? `<span>${escapeHtml(createdText)}</span>` : ""}
+    </div>
+    <div class="shared-holding-list">
+      ${holdingRows.join("") || `<div class="status">${escapeHtml(t("noResults"))}</div>`}
+    </div>
+  `;
+}
+
+function applySharedPortfolioToEditor() {
+  const portfolio = state.shareView.portfolio;
+  if (!portfolio) return;
+  document.body.classList.remove("share-view");
+  state.shareView = { active: false, portfolio: null };
+  renderSharedPortfolioSummary();
+  window.history.replaceState({}, "", window.location.pathname);
+  document.title = t("pageTitle");
+  applyPortfolioSnapshot(portfolio, { autoRun: false });
+  renderFavorites();
+  renderAll();
+  updateInteractionLocks();
+}
+
 async function loadSharedPortfolioFromUrl() {
   const token = shareTokenFromUrl();
   if (!token) return;
   try {
     const data = await api(`/api/share?token=${encodeURIComponent(token)}`);
-    showShareDialog(data.portfolio, { mode: "received", url: window.location.href });
+    renderSharedPortfolioPage(data.portfolio);
   } catch (error) {
     setStatus(error.message || t("loadShareFailed"), true);
   }
@@ -2026,7 +2298,11 @@ function updateInteractionLocks() {
   els.runBtn.disabled = busy || state.assets.length < 1;
   els.runBtn.textContent = busy ? t("running") : state.backtestDirty ? t("runPending") : t("run");
   els.runBtn.classList.toggle("needs-run", state.backtestDirty && !busy);
-  els.shareCurrentBtn.disabled = busy;
+  els.shareCurrentBtn.textContent = t("share");
+  els.shareCurrentBtn.disabled = busy || state.shareView.active;
+  if (els.applySharedBtn) {
+    els.applySharedBtn.disabled = busy || !state.shareView.active || !state.shareView.portfolio;
+  }
   els.normalizeBtn.disabled = busy;
   els.startInput.disabled = busy;
   els.endInput.disabled = busy;
@@ -2282,10 +2558,16 @@ function renderMetrics() {
       `,
     )
     .join("");
-  els.rangeLabel.textContent = `${m.start} ${t("to")} ${m.end} · ${t("maxDrawdown")} ${m.drawdownPeak} ${t("to")} ${m.drawdownTrough}`;
-  els.chartTitle.textContent = state.result.assets
-    .map((asset) => `${asset.id} ${Math.round(asset.weight * 100)}%`)
-    .join(" / ");
+  const rangeText = m.start && m.end ? `${m.start} ${t("to")} ${m.end}` : shareDateText(state.shareView.portfolio || {});
+  const drawdownRangeText = m.drawdownPeak && m.drawdownTrough
+    ? ` · ${t("maxDrawdown")} ${m.drawdownPeak} ${t("to")} ${m.drawdownTrough}`
+    : "";
+  els.rangeLabel.textContent = `${rangeText}${drawdownRangeText}`;
+  els.chartTitle.textContent = state.shareView.active && state.shareView.portfolio?.name
+    ? state.shareView.portfolio.name
+    : state.result.assets
+      .map((asset) => `${asset.id} ${Math.round(asset.weight * 100)}%`)
+      .join(" / ");
 }
 
 function renderCorrelation() {
@@ -3727,11 +4009,7 @@ function optimizerMapMarkup() {
         </div>
         <button type="button" class="optimizer-map-reset" data-optimizer-map-reset>${escapeHtml(t("resetMap"))}</button>
       </div>
-      <canvas id="optimizerMapCanvas" class="optimizer-map-canvas" height="210"></canvas>
-      <div class="optimizer-map-legend">
-        <span>${escapeHtml(t("drawdownShort"))} →</span>
-        <span>${escapeHtml(t("annualShort"))} ↑</span>
-      </div>
+      <canvas id="optimizerMapCanvas" class="optimizer-map-canvas" height="210" aria-label="${escapeHtml(t("candidateMap"))}"></canvas>
     </section>
   `;
 }
@@ -3786,7 +4064,7 @@ function optimizerMapGeometry(canvas) {
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(280, rect.width || 320);
   const height = Math.max(190, rect.height || 210);
-  const pad = { left: 42, right: 18, top: 18, bottom: 32 };
+  const pad = { left: 58, right: 18, top: 24, bottom: 48 };
   return {
     width,
     height,
@@ -3842,9 +4120,38 @@ function renderOptimizerMap(profiles) {
     const spanY = Math.max(view.maxY - view.minY, 0.0001);
     const xFor = (value) => pad.left + (value - view.minX) / spanX * plotW;
     const yFor = (value) => pad.top + (1 - (value - view.minY) / spanY) * plotH;
+    const xTicks = linearTicks(view.minX, view.maxX, Math.min(7, Math.max(4, Math.floor(plotW / 95))));
+    const yTicks = linearTicks(view.minY, view.maxY, Math.min(6, Math.max(4, Math.floor(plotH / 58))));
+    const xDigits = pctTickDigits(xTicks);
+    const yDigits = pctTickDigits(yTicks);
 
     ctx.strokeStyle = cssVar("--line");
     ctx.lineWidth = 1;
+    ctx.font = "11px system-ui";
+    ctx.textBaseline = "middle";
+    xTicks.forEach((tick) => {
+      const x = xFor(tick);
+      ctx.beginPath();
+      ctx.moveTo(x, pad.top);
+      ctx.lineTo(x, height - pad.bottom);
+      ctx.stroke();
+      ctx.fillStyle = cssVar("--muted");
+      ctx.textAlign = "center";
+      ctx.fillText(fmtPct(tick, xDigits), x, height - pad.bottom + 16);
+    });
+    yTicks.forEach((tick) => {
+      const y = yFor(tick);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(width - pad.right, y);
+      ctx.stroke();
+      ctx.fillStyle = cssVar("--muted");
+      ctx.textAlign = "right";
+      ctx.fillText(fmtPct(tick, yDigits), pad.left - 8, y);
+    });
+
+    ctx.strokeStyle = cssVar("--axis");
+    ctx.lineWidth = 1.15;
     ctx.beginPath();
     ctx.moveTo(pad.left, pad.top);
     ctx.lineTo(pad.left, height - pad.bottom);
@@ -3852,13 +4159,15 @@ function renderOptimizerMap(profiles) {
     ctx.stroke();
 
     ctx.fillStyle = cssVar("--muted");
-    ctx.font = "11px system-ui";
-    ctx.textAlign = "left";
-    ctx.fillText(fmtPct(view.maxY, 0), 7, pad.top + 4);
-    ctx.fillText(fmtPct(view.minY, 0), 7, height - pad.bottom);
-    ctx.fillText(fmtPct(view.minX, 0), pad.left, height - 9);
-    ctx.textAlign = "right";
-    ctx.fillText(fmtPct(view.maxX, 0), width - pad.right, height - 9);
+    ctx.font = "700 11px system-ui";
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "center";
+    ctx.fillText(t("drawdownShort"), pad.left + plotW / 2, height - 8);
+    ctx.save();
+    ctx.translate(15, pad.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(t("annualShort"), 0, 0);
+    ctx.restore();
 
     ctx.save();
     ctx.beginPath();
@@ -3873,15 +4182,18 @@ function renderOptimizerMap(profiles) {
       const radius = 4 + navRatio * 4;
       const x = xFor(Math.abs(profile.metrics.maxDrawdown));
       const y = yFor(profile.metrics.cagr);
+      const highlighted = state.optimizerHighlightedKey === key;
       plottedPoints.push({ key, profile, x, y, radius });
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fillStyle = selected.has(key)
         ? cssVar("--accent")
+        : highlighted
+          ? cssVar("--warning")
         : featured.has(key)
           ? cssVar("--active-text")
           : cssVar("--button-text");
-      ctx.globalAlpha = selected.has(key) || featured.has(key) ? 0.9 : 0.45;
+      ctx.globalAlpha = selected.has(key) || featured.has(key) || highlighted ? 0.92 : 0.45;
       ctx.fill();
       ctx.globalAlpha = 1;
       if (selected.has(key)) {
@@ -3889,9 +4201,9 @@ function renderOptimizerMap(profiles) {
         ctx.lineWidth = 2;
         ctx.stroke();
       }
-      if (state.optimizerFocusedKey === key) {
-        ctx.strokeStyle = cssVar("--ink");
-        ctx.lineWidth = 2;
+      if (state.optimizerFocusedKey === key || highlighted) {
+        ctx.strokeStyle = highlighted ? cssVar("--warning") : cssVar("--ink");
+        ctx.lineWidth = highlighted ? 2.4 : 2;
         ctx.beginPath();
         ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
         ctx.stroke();
@@ -4036,6 +4348,37 @@ function renderOptimizerMap(profiles) {
   draw();
 }
 
+function captureOptimizerResultsScrollState() {
+  const tableWrap = els.optimizerResults?.querySelector(".optimizer-table-wrap");
+  const sideScroll = els.optimizerResults?.querySelector(".optimizer-side-scroll");
+  return {
+    rootTop: els.optimizerResults?.scrollTop ?? 0,
+    tableTop: tableWrap?.scrollTop ?? 0,
+    tableLeft: tableWrap?.scrollLeft ?? 0,
+    sideTop: sideScroll?.scrollTop ?? 0,
+  };
+}
+
+function restoreOptimizerResultsScrollState(snapshot) {
+  if (!snapshot || !els.optimizerResults) return;
+  const tableWrap = els.optimizerResults.querySelector(".optimizer-table-wrap");
+  const sideScroll = els.optimizerResults.querySelector(".optimizer-side-scroll");
+  els.optimizerResults.scrollTop = snapshot.rootTop;
+  if (tableWrap) {
+    tableWrap.scrollTop = snapshot.tableTop;
+    tableWrap.scrollLeft = snapshot.tableLeft;
+  }
+  if (sideScroll) sideScroll.scrollTop = snapshot.sideTop;
+  scheduleOverlayScrollbarUpdate();
+}
+
+function renderOptimizerPreservingResultsScroll(profiles = state.optimizerProfiles, summary = state.optimizerSummary) {
+  const snapshot = captureOptimizerResultsScrollState();
+  renderOptimizer(profiles, summary);
+  restoreOptimizerResultsScrollState(snapshot);
+  requestAnimationFrame(() => restoreOptimizerResultsScrollState(snapshot));
+}
+
 function renderOptimizer(profiles, summary = state.optimizerSummary) {
   state.optimizerProfiles = profiles || [];
   state.optimizerSummary = summary || null;
@@ -4043,6 +4386,9 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
   state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((key) => keys.has(key));
   if (state.optimizerFocusedKey && !keys.has(state.optimizerFocusedKey)) {
     state.optimizerFocusedKey = "";
+  }
+  if (state.optimizerHighlightedKey && !keys.has(state.optimizerHighlightedKey)) {
+    state.optimizerHighlightedKey = "";
   }
   if (!state.optimizerProfiles.length) {
     els.optimizerResults.innerHTML = `<div class="status">${t("noResults")}</div>`;
@@ -4192,7 +4538,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
         state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((item) => item !== key);
         if (state.optimizerFocusedKey === key) state.optimizerFocusedKey = "";
       }
-      renderOptimizer(state.optimizerProfiles);
+      renderOptimizerPreservingResultsScroll();
     });
   });
   const selectVisibleInput = els.optimizerResults.querySelector("[data-optimizer-select-visible]");
@@ -4208,7 +4554,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
         state.optimizerSelectedKeys = state.optimizerSelectedKeys.filter((key) => !visibleKeys.has(key));
         if (visibleKeys.has(state.optimizerFocusedKey)) state.optimizerFocusedKey = "";
       }
-      renderOptimizer(state.optimizerProfiles);
+      renderOptimizerPreservingResultsScroll();
     });
   }
   els.optimizerResults.querySelectorAll("[data-optimizer-bulk]").forEach((button) => {
@@ -4324,6 +4670,7 @@ function bindEvents() {
     if (state.loading) return;
     sharePortfolio(currentShareSnapshot());
   });
+  els.applySharedBtn?.addEventListener("click", applySharedPortfolioToEditor);
   els.shareCloseBtn.addEventListener("click", closeShareDialog);
   els.shareOverlay.addEventListener("click", (event) => {
     if (event.target === els.shareOverlay) closeShareDialog();
@@ -4432,7 +4779,7 @@ function bindEvents() {
   els.addCurrentCompareBtn.addEventListener("click", addCurrentToComparison);
   els.resetZoomBtn.addEventListener("click", () => {
     if (!state.result || state.loading) return;
-    if (isComparisonMode()) {
+    if (isComparisonMode() || state.shareView.active) {
       const viewResult = chartResultForView();
       state.view = { start: 0, end: viewResult.dates.length - 1 };
       renderChart();
@@ -4480,7 +4827,7 @@ function bindEvents() {
       const a = pointToIndex(rect.left + startX);
       const b = pointToIndex(rect.left + endX);
       if (b - a > 10) {
-        if (isComparisonMode()) {
+        if (isComparisonMode() || state.shareView.active) {
           state.view = { start: a, end: b };
           renderChart();
           renderLegend();
@@ -4509,14 +4856,15 @@ async function bootstrapApp() {
   renderScaleMode();
   try {
     const hasShareToken = Boolean(shareTokenFromUrl());
+    if (hasShareToken) {
+      state.bootstrapped = true;
+      await loadSharedPortfolioFromUrl();
+      return;
+    }
     await loadCatalog();
     renderAssets();
     renderFavorites();
     state.bootstrapped = true;
-    if (hasShareToken) {
-      await loadSharedPortfolioFromUrl();
-      return;
-    }
     await runBacktest(true);
   } catch (error) {
     setStatus(error.message, true);
@@ -4532,7 +4880,7 @@ async function init() {
   loadSavedState();
   applyI18n();
   bindEvents();
-  if (authRequired() && !storedAccessKey()) {
+  if (authRequired() && !storedAccessKey() && !shareTokenFromUrl()) {
     showAuthOverlay();
     return;
   }
