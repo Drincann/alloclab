@@ -671,10 +671,15 @@ input:disabled {
   overflow-y: auto;
 }
 
+html.share-boot .app-shell,
 body.share-view .app-shell {
   grid-template-columns: minmax(0, 1fr);
 }
 
+html.share-boot .sidebar,
+html.share-boot #addCurrentCompareBtn,
+html.share-boot #comparisonPanel,
+html.share-boot #optimizerResults,
 body.share-view .sidebar,
 body.share-view #addCurrentCompareBtn,
 body.share-view #comparisonPanel,
@@ -682,17 +687,57 @@ body.share-view #optimizerResults {
   display: none !important;
 }
 
+html.share-boot .main-area,
 body.share-view .main-area {
   width: min(1180px, 100%);
   margin: 0 auto;
 }
 
+html.share-boot .chart-control-bar,
 body.share-view .chart-control-bar {
   justify-content: flex-start;
 }
 
+html.share-boot .chart-action-group,
 body.share-view .chart-action-group {
   margin-left: auto;
+}
+
+html.share-boot #shareCurrentBtn,
+body.share-loading #shareCurrentBtn {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+html.share-boot #analysisDetails,
+body.share-view:not(.share-ready) #analysisDetails {
+  display: none;
+}
+
+html.share-boot #chartTitle {
+  visibility: hidden;
+  position: relative;
+}
+
+html.share-boot #chartTitle::after {
+  content: "组合详情";
+  visibility: visible;
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+html.share-boot #rangeLabel {
+  visibility: hidden;
+  position: relative;
+}
+
+html.share-boot #rangeLabel::after {
+  content: "分享加载中";
+  visibility: visible;
+  position: absolute;
+  left: 0;
+  top: 0;
 }
 
 #applySharedBtn {
@@ -742,6 +787,35 @@ body.share-view #applySharedBtn {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 6px;
+}
+
+.shared-loading-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.shared-loading-row span {
+  height: 50px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--panel) 0%,
+    color-mix(in srgb, var(--panel-alt) 72%, var(--panel)) 48%,
+    var(--panel) 100%
+  );
+  background-size: 220% 100%;
+  animation: shared-loading-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shared-loading-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
 }
 
 .shared-holding-row {
@@ -1285,6 +1359,20 @@ h2 {
 
 .chart-loading.active {
   display: flex;
+}
+
+html.share-boot #chartLoading,
+body.share-loading #chartLoading {
+  display: flex;
+}
+
+html.share-boot #chartLoading {
+  font-size: 0;
+}
+
+html.share-boot #chartLoading::after {
+  content: "分享加载中";
+  font-size: 14px;
 }
 
 .chart-legend {

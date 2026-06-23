@@ -4,6 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AllocLab</title>
+    <script>
+      if (new URLSearchParams(window.location.search).has("share")) {
+        document.documentElement.classList.add("share-boot");
+      }
+    </script>
     <link rel="stylesheet" href="/styles.css?v=20260623-share-snapshot" />
   </head>
   <body>

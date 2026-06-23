@@ -37,6 +37,8 @@ const state = {
   shareView: {
     active: false,
     portfolio: null,
+    loading: false,
+    error: "",
   },
   comparison: {
     active: false,
@@ -187,6 +189,7 @@ const I18N = {
     sharePreview: "发布分享",
     sharedViewTitle: "组合详情",
     shareReady: "分享链接已生成",
+    shareLoading: "分享加载中",
     shareLink: "分享链接",
     copy: "复制",
     copySuffix: "副本",
@@ -404,6 +407,7 @@ const I18N = {
     sharePreview: "Publish Share",
     sharedViewTitle: "Portfolio Details",
     shareReady: "Share Link Ready",
+    shareLoading: "Loading shared portfolio",
     shareLink: "Share link",
     copy: "Copy",
     copySuffix: "Copy",
@@ -1734,14 +1738,61 @@ function sharedResultFromPortfolio(portfolio) {
   };
 }
 
+function applyShareViewClasses({ loading = false, ready = false } = {}) {
+  document.documentElement.classList.remove("share-boot");
+  document.body.classList.add("share-view");
+  document.body.classList.toggle("share-loading", loading);
+  document.body.classList.toggle("share-ready", ready);
+}
+
+function renderSharedPortfolioLoadingPage() {
+  state.shareView = { active: true, portfolio: null, loading: true, error: "" };
+  state.shareDialog = null;
+  state.result = null;
+  state.backtestError = null;
+  state.backtestDirty = false;
+  state.loading = true;
+  state.optimizing = false;
+  state.optimizerProfiles = [];
+  state.optimizerSummary = null;
+  state.comparison.active = false;
+  applyShareViewClasses({ loading: true, ready: false });
+  document.title = `${t("sharedPortfolio")} · ${t("sharedViewTitle")}`;
+  els.chartTitle.textContent = t("sharedPortfolio");
+  els.rangeLabel.textContent = t("shareLoading");
+  renderShareDialog();
+  renderScaleMode();
+  renderSharedPortfolioSummary();
+  renderAll();
+  updateInteractionLocks();
+}
+
+function renderSharedPortfolioLoadError(message = "") {
+  const error = message || t("loadShareFailed");
+  state.shareView = { active: true, portfolio: null, loading: false, error };
+  state.loading = false;
+  state.result = null;
+  state.backtestError = null;
+  applyShareViewClasses({ loading: false, ready: false });
+  els.chartTitle.textContent = t("sharedPortfolio");
+  els.rangeLabel.textContent = error;
+  renderSharedPortfolioSummary();
+  renderAll();
+  updateInteractionLocks();
+}
+
 function renderSharedPortfolioPage(portfolio) {
   const result = sharedResultFromPortfolio(portfolio);
   if (!result) {
+    state.shareView = { active: true, portfolio, loading: false, error: "" };
+    state.loading = false;
+    applyShareViewClasses({ loading: false, ready: false });
     showShareDialog(portfolio, { mode: "received", url: window.location.href });
+    updateInteractionLocks();
     return;
   }
-  state.shareView = { active: true, portfolio };
-  document.body.classList.add("share-view");
+  state.shareView = { active: true, portfolio, loading: false, error: "" };
+  applyShareViewClasses({ loading: false, ready: true });
   document.title = `${portfolio.name || t("sharedPortfolio")} · ${t("sharedViewTitle")}`;
   state.shareDialog = null;
   state.result = result;
@@ -1791,6 +1842,24 @@ function renderSharedPortfolioSummary() {
   if (chartControlBar && summary.nextElementSibling !== chartControlBar) {
     chartControlBar.insertAdjacentElement("beforebegin", summary);
   }
+  if (state.shareView.loading) {
+    summary.innerHTML = `
+      <div class="shared-portfolio-summary-head">
+        <strong>${escapeHtml(t("sharedPortfolio"))}</strong>
+        <span>${escapeHtml(t("shareLoading"))}</span>
+      </div>
+      <div class="shared-loading-row" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    `;
+    return;
+  }
+  if (state.shareView.error) {
+    summary.innerHTML = `<div class="status error">${escapeHtml(state.shareView.error)}</div>`;
+    return;
+  }
   const portfolio = state.shareView.portfolio || {};
   const resultAssetsById = new Map((state.result?.assets || []).map((asset) => [asset.id, asset]));
   const holdingRows = (portfolio.assets || []).map((asset) => {
@@ -1826,8 +1895,9 @@ function renderSharedPortfolioSummary() {
 function applySharedPortfolioToEditor() {
   const portfolio = state.shareView.portfolio;
   if (!portfolio) return;
-  document.body.classList.remove("share-view");
-  state.shareView = { active: false, portfolio: null };
+  document.body.classList.remove("share-view", "share-loading", "share-ready");
+  document.documentElement.classList.remove("share-boot");
+  state.shareView = { active: false, portfolio: null, loading: false, error: "" };
   renderSharedPortfolioSummary();
   window.history.replaceState({}, "", window.location.pathname);
   document.title = t("pageTitle");
@@ -1840,11 +1910,12 @@ function applySharedPortfolioToEditor() {
 async function loadSharedPortfolioFromUrl() {
   const token = shareTokenFromUrl();
   if (!token) return;
+  renderSharedPortfolioLoadingPage();
   try {
     const data = await api(`/api/share?token=${encodeURIComponent(token)}`);
     renderSharedPortfolioPage(data.portfolio);
   } catch (error) {
-    setStatus(error.message || t("loadShareFailed"), true);
+    renderSharedPortfolioLoadError(error.message || t("loadShareFailed"));
   }
 }
 
@@ -2352,8 +2423,8 @@ function updateInteractionLocks() {
   });
   refreshOptimizerCompareButtons();
   if (els.chartLoading) {
-    els.chartLoading.textContent = t("backtesting");
-    els.chartLoading.classList.toggle("active", busy);
+    els.chartLoading.textContent = state.shareView.loading ? t("shareLoading") : t("backtesting");
+    els.chartLoading.classList.toggle("active", busy || state.shareView.loading);
   }
   renderModes();
   refreshSearchSelectionState();
@@ -2518,6 +2589,20 @@ function renderOptimizerModuleState() {
 
 function renderAll() {
   renderAnalysisDetails();
+  if (state.shareView.loading) {
+    drawChartMessage("", [], false);
+    clearChartLegend();
+    renderComparisonPanel();
+    ensureOverlayScrollbars();
+    return;
+  }
+  if (state.shareView.active && state.shareView.error && !state.result) {
+    drawChartMessage(t("loadShareFailed"), [state.shareView.error], true);
+    clearChartLegend();
+    renderComparisonPanel();
+    ensureOverlayScrollbars();
+    return;
+  }
   if (!state.result) {
     if (isComparisonMode() && comparisonEntries().length) {
       renderChart();
