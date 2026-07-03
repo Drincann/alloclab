@@ -1189,6 +1189,7 @@ function comparisonSortValue(entry, sortKey) {
   if (sortKey === "portfolio") return entry.title || "";
   if (sortKey === "rebalance") return rebalanceLabel(entry.rebalance);
   if (sortKey === "cagr") return Number(metrics.cagr ?? -Infinity);
+  if (sortKey === "sharpe") return Number(metrics.sharpe0 ?? -Infinity);
   if (sortKey === "drawdown") return Number(metrics.maxDrawdown ?? -Infinity);
   if (sortKey === "averageNav") return Number(metrics.averageNav ?? -Infinity);
   if (sortKey === "withdrawal") {
@@ -3598,6 +3599,7 @@ function renderComparisonPanel(message = "") {
           <td><strong><i class="comparison-drag-handle" aria-hidden="true">⋮⋮</i>${escapeHtml(displayTitle)}</strong><span>${escapeHtml(entry.weightsText)}</span></td>
           <td>${escapeHtml(rebalanceLabel(entry.rebalance))}</td>
           <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
+          <td>${escapeHtml(fmtNum(metrics.sharpe0))}</td>
           <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
           <td>${escapeHtml(fmtMultiple(metrics.averageNav))}</td>
           <td>${escapeHtml(fmtWithdrawalCagr(metrics))}</td>
@@ -3627,6 +3629,7 @@ function renderComparisonPanel(message = "") {
             <th><button type="button" data-sort="portfolio">${escapeHtml(t("portfolio"))}${escapeHtml(comparisonSortIndicator("portfolio"))}</button></th>
             <th><button type="button" data-sort="rebalance">${escapeHtml(t("rebalance"))}${escapeHtml(comparisonSortIndicator("rebalance"))}</button></th>
             <th><button type="button" data-sort="cagr">${escapeHtml(t("annualShort"))}${escapeHtml(comparisonSortIndicator("cagr"))}</button></th>
+            <th><button type="button" data-sort="sharpe">${escapeHtml(t("sharpeShort"))}${escapeHtml(comparisonSortIndicator("sharpe"))}</button></th>
             <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>
             <th><button type="button" data-sort="averageNav">${escapeHtml(t("averageNavShort"))}${escapeHtml(comparisonSortIndicator("averageNav"))}</button></th>
             <th><button type="button" data-sort="withdrawal">${escapeHtml(t("withdrawal4Short"))}${escapeHtml(comparisonSortIndicator("withdrawal"))}</button></th>
