@@ -5,11 +5,13 @@ const state = {
     { id: "GLD", weight: 40 },
   ],
   rebalance: { mode: "threshold", threshold: 0.2 },
+  cashflow: { mode: "none", contributionRate: 0 },
   result: null,
   view: null,
   selection: null,
   hoverIndex: null,
   loading: false,
+  operationProgress: { kind: "", value: 0, stage: "", detail: "" },
   pendingBacktestResetView: null,
   backtestDirty: false,
   analysisDetailsCollapsed: false,
@@ -71,12 +73,18 @@ const els = {
   runBtn: document.getElementById("runBtn"),
   normalizeBtn: document.getElementById("normalizeBtn"),
   thresholdInput: document.getElementById("thresholdInput"),
+  cashflowModeInput: document.getElementById("cashflowModeInput"),
+  cashflowContributionInput: document.getElementById("cashflowContributionInput"),
   startInput: document.getElementById("startInput"),
   endInput: document.getElementById("endInput"),
   modes: document.getElementById("rebalanceModes"),
   canvas: document.getElementById("equityCanvas"),
   tooltip: document.getElementById("tooltip"),
   chartLoading: document.getElementById("chartLoading"),
+  operationProgressLabel: document.getElementById("operationProgressLabel"),
+  operationProgressBar: document.getElementById("operationProgressBar"),
+  operationProgressFill: document.getElementById("operationProgressFill"),
+  operationProgressPercent: document.getElementById("operationProgressPercent"),
   analysisDetails: document.getElementById("analysisDetails"),
   analysisToggleBtn: document.getElementById("analysisToggleBtn"),
   analysisToggleText: document.getElementById("analysisToggleText"),
@@ -89,6 +97,7 @@ const els = {
   optimizerMaxWeightInput: document.getElementById("optimizerMaxWeightInput"),
   optimizerMaxDrawdownInput: document.getElementById("optimizerMaxDrawdownInput"),
   optimizerLimitInput: document.getElementById("optimizerLimitInput"),
+  optimizerContributionInput: document.getElementById("optimizerContributionInput"),
   optimizerResults: document.getElementById("optimizerResults"),
   addCurrentCompareBtn: document.getElementById("addCurrentCompareBtn"),
   applySharedBtn: document.getElementById("applySharedBtn"),
@@ -126,6 +135,8 @@ const els = {
   compareEditorNormalizeBtn: document.getElementById("compareEditorNormalizeBtn"),
   compareEditorRebalanceMode: document.getElementById("compareEditorRebalanceMode"),
   compareEditorThresholdInput: document.getElementById("compareEditorThresholdInput"),
+  compareEditorContributionInput: document.getElementById("compareEditorContributionInput"),
+  compareEditorCashflowMode: document.getElementById("compareEditorCashflowMode"),
   compareEditorError: document.getElementById("compareEditorError"),
   rangeLabel: document.getElementById("rangeLabel"),
   chartTitle: document.getElementById("chartTitle"),
@@ -181,6 +192,17 @@ const I18N = {
     runPending: "运行更新",
     running: "运行中",
     backtesting: "回测中",
+    progressPreparing: "准备数据",
+    progressMarket: "获取行情",
+    progressAlign: "对齐交易日期",
+    progressSimulate: "计算组合净值",
+    progressMetrics: "计算风险指标",
+    progressScan: "扫描候选组合",
+    progressScore: "计算候选得分",
+    progressRank: "整理重点候选",
+    progressFinalize: "整理结果",
+    progressCached: "读取扫描缓存",
+    progressComplete: "完成",
     searchPlaceholder: "搜索代码 / 指数 / ETF / 基金",
     assets: "标的",
     normalize: "归一化",
@@ -236,6 +258,13 @@ const I18N = {
     maxWeight: "最大权重",
     maxDrawdownLimit: "回撤上限",
     resultCount: "返回数量",
+    contributionRate: "月定投 (%)",
+    contributionRateHint: "每月投入金额占初始本金的比例",
+    cashflowStrategy: "现金流买入",
+    cashflowTarget: "按目标比例",
+    cashflowUnderweight: "补低配",
+    cashflowDrift: "跟随漂移",
+    cashflowNone: "无现金流",
     scanSummary: "扫描摘要",
     featuredCandidates: "重点候选",
     allCandidates: "全部候选",
@@ -404,6 +433,17 @@ const I18N = {
     runPending: "Run update",
     running: "Running",
     backtesting: "Backtesting",
+    progressPreparing: "Preparing data",
+    progressMarket: "Loading market data",
+    progressAlign: "Aligning trading dates",
+    progressSimulate: "Calculating portfolio NAV",
+    progressMetrics: "Calculating risk metrics",
+    progressScan: "Scanning candidates",
+    progressScore: "Scoring candidates",
+    progressRank: "Selecting candidates",
+    progressFinalize: "Finalizing results",
+    progressCached: "Loading scan cache",
+    progressComplete: "Complete",
     searchPlaceholder: "Search ticker / index / ETF / fund",
     assets: "Assets",
     normalize: "Normalize",
@@ -459,6 +499,13 @@ const I18N = {
     maxWeight: "Max weight",
     maxDrawdownLimit: "Max drawdown",
     resultCount: "Result count",
+    contributionRate: "Monthly DCA (%)",
+    contributionRateHint: "Monthly contribution as a percentage of initial capital",
+    cashflowStrategy: "Cashflow buys",
+    cashflowTarget: "Target weights",
+    cashflowUnderweight: "Underweight first",
+    cashflowDrift: "Follow drift",
+    cashflowNone: "No cashflow",
     scanSummary: "Scan summary",
     featuredCandidates: "Featured",
     allCandidates: "All candidates",
@@ -1035,6 +1082,42 @@ function rebalanceLabel(rule) {
   return mode || t("rebalanceNone");
 }
 
+function normalizeCashflow(rawCashflow) {
+  const allowedModes = new Set(["target", "underweight", "drift"]);
+  const mode = allowedModes.has(rawCashflow?.mode) ? rawCashflow.mode : "none";
+  let contributionRate = Number(rawCashflow?.contributionRate || 0);
+  if (contributionRate > 1) contributionRate /= 100;
+  contributionRate = Math.max(0, Math.min(0.2, Number.isFinite(contributionRate) ? contributionRate : 0));
+  if (mode === "none" || contributionRate <= 0) {
+    return { mode: "none", contributionRate: 0, frequency: "monthly" };
+  }
+  return { mode, contributionRate, frequency: "monthly" };
+}
+
+function cashflowLabel(rawCashflow) {
+  const cashflow = normalizeCashflow(rawCashflow);
+  if (cashflow.mode === "none") return t("cashflowNone");
+  const labels = {
+    target: t("cashflowTarget"),
+    underweight: t("cashflowUnderweight"),
+    drift: t("cashflowDrift"),
+  };
+  const suffix = state.language === "zh" ? "/月" : "/mo";
+  return `${labels[cashflow.mode]} ${fmtPct(cashflow.contributionRate, 1)}${suffix}`;
+}
+
+function portfolioRuleLabel(rebalance, cashflow) {
+  const normalized = normalizeCashflow(cashflow);
+  return normalized.mode === "none"
+    ? rebalanceLabel(rebalance)
+    : `${rebalanceLabel(rebalance)} · ${cashflowLabel(normalized)}`;
+}
+
+function cashflowKeyPart(cashflow) {
+  const normalized = normalizeCashflow(cashflow);
+  return `${normalized.mode}|${normalized.contributionRate.toFixed(4)}`;
+}
+
 function weightsTextFromFractions(weights) {
   return weights
     .map((weight, i) => `${state.assets[i]?.id || ""} ${Math.round(Number(weight || 0) * 100)}%`)
@@ -1047,14 +1130,14 @@ function weightsTextFromConfig(assets, weights) {
     .join(" / ");
 }
 
-function comparisonKeyForAssets(assets, weights, rebalance) {
+function comparisonKeyForAssets(assets, weights, rebalance, cashflow) {
   const assetPart = (assets || []).map((asset) => String(asset.id || "").trim().toUpperCase()).join(",");
   const weightPart = weights.map((weight) => Number(weight || 0).toFixed(4)).join(",");
-  return `${assetPart}|${weightPart}|${rebalance?.mode || "none"}|${Number(rebalance?.threshold || 0).toFixed(4)}`;
+  return `${assetPart}|${weightPart}|${rebalance?.mode || "none"}|${Number(rebalance?.threshold || 0).toFixed(4)}|${cashflowKeyPart(cashflow)}`;
 }
 
-function comparisonKey(weights, rebalance) {
-  return comparisonKeyForAssets(state.assets, weights, rebalance);
+function comparisonKey(weights, rebalance, cashflow = state.cashflow) {
+  return comparisonKeyForAssets(state.assets, weights, rebalance, cashflow);
 }
 
 function currentWeightsAsFractions() {
@@ -1066,7 +1149,12 @@ function currentComparisonKey() {
 }
 
 function profileComparisonKey(profile) {
-  return comparisonKeyForAssets(profile.assets || state.assets, profile.weights || [], profile.rebalance || {});
+  return comparisonKeyForAssets(
+    profile.assets || state.assets,
+    profile.weights || [],
+    profile.rebalance || {},
+    profile.cashflow,
+  );
 }
 
 function isComparisonMode() {
@@ -1187,7 +1275,7 @@ function comparisonMetricsForEntry(entry) {
 function comparisonSortValue(entry, sortKey) {
   const metrics = comparisonMetricsForEntry(entry);
   if (sortKey === "portfolio") return entry.title || "";
-  if (sortKey === "rebalance") return rebalanceLabel(entry.rebalance);
+  if (sortKey === "rebalance") return portfolioRuleLabel(entry.rebalance, entry.cashflow);
   if (sortKey === "cagr") return Number(metrics.cagr ?? -Infinity);
   if (sortKey === "sharpe") return Number(metrics.sharpe0 ?? -Infinity);
   if (sortKey === "drawdown") return Number(metrics.maxDrawdown ?? -Infinity);
@@ -1380,6 +1468,7 @@ function loadSavedState() {
         threshold: Number(saved.rebalance.threshold || 0.1),
       };
     }
+    state.cashflow = normalizeCashflow(saved.cashflow);
     if (Array.isArray(saved.extraCatalog)) {
       state.extraCatalog = saved.extraCatalog;
     }
@@ -1406,6 +1495,7 @@ function saveState() {
     const statePayload = {
       assets: state.assets.map((asset) => ({ id: asset.id, weight: Number(asset.weight || 0) })),
       rebalance: state.rebalance,
+      cashflow: normalizeCashflow(state.cashflow),
       start: els.startInput.value || "",
       end: els.endInput.value || "",
       chartScale: state.chartScale,
@@ -1446,6 +1536,7 @@ function currentFavoriteSnapshot(name) {
     createdAt: new Date().toISOString(),
     assets: state.assets.map((asset) => ({ id: asset.id, weight: Number(asset.weight || 0) })),
     rebalance: { ...state.rebalance },
+    cashflow: normalizeCashflow(state.cashflow),
     start: els.startInput.value || "",
     end: els.endInput.value || "",
     catalog: snapshotCatalogForAssets(state.assets),
@@ -1498,6 +1589,7 @@ function shareResultSnapshot(result) {
     correlation: (result.correlation || []).map((row) => [...row]),
     assetSeries: (result.assetSeries || []).map((series) => [...series]),
     assetStats: (result.assetStats || []).map((asset) => ({ ...asset })),
+    cashflow: normalizeCashflow(result.cashflow || state.cashflow),
   };
 }
 
@@ -1513,6 +1605,7 @@ function sameSharePortfolioAsCurrent(portfolio) {
   const rebalance = portfolio.rebalance || {};
   if ((rebalance.mode || "none") !== (state.rebalance.mode || "none")) return false;
   if (Math.abs(Number(rebalance.threshold || 0.1) - Number(state.rebalance.threshold || 0.1)) > 0.0001) return false;
+  if (cashflowKeyPart(portfolio.cashflow) !== cashflowKeyPart(state.cashflow)) return false;
   return (portfolio.start || "") === (els.startInput.value || "") && (portfolio.end || "") === (els.endInput.value || "");
 }
 
@@ -1587,7 +1680,7 @@ function shareSubtitleForMode(mode) {
 }
 
 function receivedShareSubtitle(portfolio) {
-  return `${shareDateText(portfolio)} · ${rebalanceLabel(portfolio.rebalance)}`;
+  return `${shareDateText(portfolio)} · ${portfolioRuleLabel(portfolio.rebalance, portfolio.cashflow)}`;
 }
 
 function drawShareCurve(portfolio) {
@@ -1687,7 +1780,7 @@ function renderShareDialog() {
     </div>
     <div class="share-rule-card">
       <span>${escapeHtml(t("rebalance"))}</span>
-      <strong>${escapeHtml(rebalanceLabel(portfolio.rebalance))}</strong>
+      <strong>${escapeHtml(portfolioRuleLabel(portfolio.rebalance, portfolio.cashflow))}</strong>
     </div>
   `;
   const metricRows = shareMetricRows(portfolio);
@@ -1778,6 +1871,7 @@ async function enrichShareDraft(portfolio) {
       body: JSON.stringify({
         assets: portfolio.assets,
         rebalance: portfolio.rebalance,
+        cashflow: normalizeCashflow(portfolio.cashflow),
         start: portfolio.start || null,
         end: portfolio.end || null,
       }),
@@ -1872,6 +1966,7 @@ function sharedResultFromPortfolio(portfolio) {
       correlation: [],
       assetSeries: [],
       assetStats: [],
+      cashflow: normalizeCashflow(portfolio.cashflow),
       legacyCurveOnly: true,
     };
   }
@@ -1888,6 +1983,7 @@ function sharedResultFromPortfolio(portfolio) {
     correlation: result.correlation || [],
     assetSeries: result.assetSeries || [],
     assetStats: result.assetStats || [],
+    cashflow: normalizeCashflow(result.cashflow || portfolio.cashflow),
   };
 }
 
@@ -1964,6 +2060,7 @@ function renderSharedPortfolioPage(portfolio) {
     mode: portfolio.rebalance?.mode || "none",
     threshold: Number(portfolio.rebalance?.threshold || 0.1),
   };
+  state.cashflow = normalizeCashflow(portfolio.cashflow || result.cashflow);
   els.startInput.value = portfolio.start || result.metrics?.start || "";
   els.endInput.value = portfolio.end || result.metrics?.end || "";
   els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
@@ -2036,7 +2133,7 @@ function renderSharedPortfolioSummary() {
   summary.innerHTML = `
     <div class="shared-portfolio-summary-head">
       <strong>${escapeHtml(t("portfolioWeights"))}</strong>
-      <span>${escapeHtml(rebalanceLabel(portfolio.rebalance))}</span>
+      <span>${escapeHtml(portfolioRuleLabel(portfolio.rebalance, portfolio.cashflow))}</span>
       ${createdText ? `<span>${escapeHtml(createdText)}</span>` : ""}
     </div>
     <div class="shared-holding-list">
@@ -2112,6 +2209,133 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+async function streamApi(path, options = {}, onProgress = () => {}) {
+  const {
+    accessKey,
+    showAuthOnUnauthorized = true,
+    headers: optionHeaders = {},
+    ...fetchOptions
+  } = options;
+  const headers = {
+    "Content-Type": "application/json",
+    ...optionHeaders,
+  };
+  const key = accessKey === undefined ? storedAccessKey() : accessKey;
+  if (key) headers["X-Access-Key"] = key;
+  const response = await fetch(path, { ...fetchOptions, headers });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const message = normalizeErrorMessage(data.error || `${t("requestFailed")}: ${response.status}`);
+    if (response.status === 401 && showAuthOnUnauthorized) {
+      clearStoredAccessKey();
+      showAuthOverlay(message);
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    error.kind = data.kind || "";
+    error.asset = data.asset || "";
+    error.sourceStatus = data.sourceStatus || "";
+    error.rawMessage = data.error || "";
+    throw error;
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body?.getReader();
+  let buffer = "";
+  let result;
+  let hasResult = false;
+
+  const consumeLine = (line) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line);
+    if (event.type === "progress") {
+      onProgress(event);
+      return;
+    }
+    if (event.type === "error") {
+      const error = new Error(normalizeErrorMessage(event.error || t("requestFailed")));
+      error.status = Number(event.status || 500);
+      error.kind = event.kind || "";
+      error.asset = event.asset || "";
+      error.sourceStatus = event.sourceStatus || "";
+      error.rawMessage = event.error || "";
+      throw error;
+    }
+    if (event.type === "result") {
+      result = event.data;
+      hasResult = true;
+    }
+  };
+
+  if (reader) {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+      if (done) break;
+    }
+  } else {
+    buffer = await response.text();
+  }
+  if (buffer.trim()) consumeLine(buffer);
+  if (!hasResult) throw new Error(t("requestFailed"));
+  return result;
+}
+
+function operationStageText(stage, detail = "") {
+  const labels = {
+    preparing: t("progressPreparing"),
+    market: t("progressMarket"),
+    align: t("progressAlign"),
+    simulate: t("progressSimulate"),
+    metrics: t("progressMetrics"),
+    scan: t("progressScan"),
+    score: t("progressScore"),
+    rank: t("progressRank"),
+    finalize: t("progressFinalize"),
+    cached: t("progressCached"),
+    complete: t("progressComplete"),
+  };
+  const label = labels[stage] || (state.operationProgress.kind === "optimize" ? t("scanning") : t("backtesting"));
+  return detail ? `${label} · ${detail}` : label;
+}
+
+function setOperationProgress(kind, value = 0, stage = "preparing", detail = "") {
+  state.operationProgress = {
+    kind,
+    value: Math.max(0, Math.min(1, Number(value) || 0)),
+    stage,
+    detail,
+  };
+  renderOperationProgress();
+}
+
+function clearOperationProgress(kind = "") {
+  if (kind && state.operationProgress.kind && state.operationProgress.kind !== kind) return;
+  state.operationProgress = { kind: "", value: 0, stage: "", detail: "" };
+  renderOperationProgress();
+}
+
+function renderOperationProgress() {
+  if (!els.chartLoading) return;
+  const shareLoading = Boolean(state.shareView.loading);
+  const active = shareLoading || state.loading || state.optimizing;
+  els.chartLoading.classList.toggle("active", active);
+  els.chartLoading.classList.toggle("share-progress", shareLoading);
+  if (shareLoading) {
+    els.operationProgressLabel.textContent = t("shareLoading");
+    return;
+  }
+  const progress = state.operationProgress;
+  const percent = Math.round(Math.max(0, Math.min(1, progress.value || 0)) * 100);
+  els.operationProgressLabel.textContent = operationStageText(progress.stage, progress.detail);
+  els.operationProgressFill.style.width = `${percent}%`;
+  els.operationProgressPercent.textContent = `${percent}%`;
+  els.operationProgressBar.setAttribute("aria-valuenow", String(percent));
 }
 
 function scheduleRun() {
@@ -2324,7 +2548,7 @@ function renderFavorites() {
     const assetText = favorite.assets
       .map((asset) => `${asset.id} ${Math.round(Number(asset.weight || 0))}%`)
       .join(" / ");
-    const rule = rebalanceLabel(favorite.rebalance);
+    const rule = portfolioRuleLabel(favorite.rebalance, favorite.cashflow);
     row.innerHTML = `
       <div>
         <strong>${escapeHtml(favorite.name)}</strong>
@@ -2377,6 +2601,7 @@ function cancelActiveBacktest() {
   backtestRunId += 1;
   state.loading = false;
   state.pendingBacktestResetView = null;
+  clearOperationProgress("backtest");
   updateInteractionLocks();
 }
 
@@ -2395,6 +2620,7 @@ function applyPortfolioSnapshot(portfolio, options = {}) {
     mode: portfolio.rebalance?.mode || "none",
     threshold: Number(portfolio.rebalance?.threshold || 0.1),
   };
+  state.cashflow = normalizeCashflow(portfolio.cashflow);
   els.startInput.value = portfolio.start || "";
   els.endInput.value = portfolio.end || "";
   els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
@@ -2426,6 +2652,15 @@ function renderModes() {
     button.disabled = state.loading;
   }
   els.thresholdInput.disabled = state.loading || state.rebalance.mode !== "threshold";
+  renderCashflowControls();
+}
+
+function renderCashflowControls() {
+  const cashflow = normalizeCashflow(state.cashflow);
+  els.cashflowModeInput.value = cashflow.mode;
+  els.cashflowContributionInput.value = Math.round(cashflow.contributionRate * 1000) / 10;
+  els.cashflowModeInput.disabled = state.loading;
+  els.cashflowContributionInput.disabled = state.loading || cashflow.mode === "none";
 }
 
 function renderScaleMode() {
@@ -2441,6 +2676,7 @@ function requestPayload() {
       weight: Number(asset.weight || 0),
     })),
     rebalance: state.rebalance,
+    cashflow: normalizeCashflow(state.cashflow),
     start: els.startInput.value || null,
     end: els.endInput.value || null,
   };
@@ -2456,6 +2692,9 @@ function optimizerRequestOptions() {
   const rebalanceModes = Array.from(document.querySelectorAll("[data-optimizer-rule]:checked")).map(
     (input) => input.dataset.optimizerRule,
   );
+  const cashflowStrategies = Array.from(document.querySelectorAll("[data-optimizer-cashflow]:checked")).map(
+    (input) => input.dataset.optimizerCashflow,
+  );
   const maxDrawdownText = String(els.optimizerMaxDrawdownInput?.value || "").trim();
   return {
     step: els.optimizerStepInput?.value || "auto",
@@ -2463,6 +2702,8 @@ function optimizerRequestOptions() {
     maxDrawdown: maxDrawdownText ? numericInputValue(els.optimizerMaxDrawdownInput, 0, 1, 95) / 100 : null,
     limit: numericInputValue(els.optimizerLimitInput, 24, 8, 60),
     rebalanceModes,
+    contributionRate: numericInputValue(els.optimizerContributionInput, 0, 0, 20) / 100,
+    cashflowStrategies,
   };
 }
 
@@ -2654,17 +2895,18 @@ function updateInteractionLocks() {
     els.optimizerMaxWeightInput,
     els.optimizerMaxDrawdownInput,
     els.optimizerLimitInput,
+    els.optimizerContributionInput,
   ]) {
     if (control) control.disabled = busy || state.optimizing;
   }
   document.querySelectorAll("[data-optimizer-rule]").forEach((input) => {
     input.disabled = busy || state.optimizing;
   });
+  document.querySelectorAll("[data-optimizer-cashflow]").forEach((input) => {
+    input.disabled = busy || state.optimizing;
+  });
   refreshOptimizerCompareButtons();
-  if (els.chartLoading) {
-    els.chartLoading.textContent = state.shareView.loading ? t("shareLoading") : t("backtesting");
-    els.chartLoading.classList.toggle("active", busy || state.shareView.loading);
-  }
+  renderOperationProgress();
   renderModes();
   refreshSearchSelectionState();
   for (const input of els.assetList.querySelectorAll("input")) {
@@ -2721,18 +2963,28 @@ async function runBacktest(resetView = true) {
   const controller = new AbortController();
   backtestAbortController = controller;
   state.loading = true;
+  setOperationProgress("backtest", 0, "preparing");
   state.pendingBacktestResetView = null;
   updateInteractionLocks();
   try {
     while (true) {
       const shouldResetView = resetView;
+      setOperationProgress("backtest", 0, "preparing");
       saveState();
       try {
-        const result = await api("/api/backtest", {
-          method: "POST",
-          body: JSON.stringify(requestPayload()),
-          signal: controller.signal,
-        });
+        const result = await streamApi(
+          "/api/backtest/stream",
+          {
+            method: "POST",
+            body: JSON.stringify(requestPayload()),
+            signal: controller.signal,
+          },
+          (event) => {
+            if (!controller.signal.aborted && runId === backtestRunId) {
+              setOperationProgress("backtest", event.progress, event.stage, event.detail);
+            }
+          },
+        );
         if (controller.signal.aborted || runId !== backtestRunId) return;
         state.result = result;
         state.backtestError = null;
@@ -2771,6 +3023,7 @@ async function runBacktest(resetView = true) {
     if (runId === backtestRunId) {
       state.loading = false;
       backtestAbortController = null;
+      clearOperationProgress("backtest");
       updateInteractionLocks();
       restoreScrollState(scrollSnapshot);
     }
@@ -2966,6 +3219,7 @@ function comparisonPayloadFromConfig(config) {
       weight: Number(config.weights?.[i] || 0) * 100,
     })),
     rebalance: config.rebalance,
+    cashflow: normalizeCashflow(config.cashflow),
     start: els.startInput.value || null,
     end: els.endInput.value || null,
   };
@@ -2977,6 +3231,7 @@ function comparisonConfigFromProfile(profile) {
     assets: (profile.assets || state.assets).map((asset) => ({ id: asset.id })),
     weights: [...(profile.weights || [])],
     rebalance: { ...(profile.rebalance || {}) },
+    cashflow: normalizeCashflow(profile.cashflow),
   };
 }
 
@@ -2987,6 +3242,7 @@ function currentComparisonConfig() {
     assets: state.assets.map((asset) => ({ id: asset.id })),
     weights,
     rebalance: { ...state.rebalance },
+    cashflow: normalizeCashflow(state.cashflow),
   };
 }
 
@@ -2996,6 +3252,7 @@ function comparisonConfigFromItem(item, title = item.title) {
     assets: (item.assets || state.assets).map((asset) => ({ id: asset.id })),
     weights: [...(item.weights || [])],
     rebalance: { ...(item.rebalance || {}) },
+    cashflow: normalizeCashflow(item.cashflow),
   };
 }
 
@@ -3003,12 +3260,13 @@ function comparisonItemFromConfig(config, result) {
   const assets = config.assets.map((asset) => ({ id: String(asset.id || "").trim().toUpperCase() }));
   const weights = config.weights.map((weight) => Number(weight || 0));
   return {
-    key: comparisonKeyForAssets(assets, weights, config.rebalance),
+    key: comparisonKeyForAssets(assets, weights, config.rebalance, config.cashflow),
     title: config.title || t("customPortfolio"),
     assets,
     weights,
     weightsText: weightsTextFromConfig(assets, weights),
     rebalance: { ...config.rebalance },
+    cashflow: normalizeCashflow(config.cashflow),
     result,
   };
 }
@@ -3094,7 +3352,7 @@ async function addProfileToComparison(profile) {
   if (!state.result || state.loading || state.optimizing || state.comparison.pendingKey || state.comparison.pendingAll) return;
   enterComparisonMode();
   const config = comparisonConfigFromProfile(profile);
-  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance, config.cashflow);
   if (state.comparison.items.some((item) => item.key === key)) {
     renderComparisonPanel();
     renderOptimizer(state.optimizerProfiles);
@@ -3132,7 +3390,7 @@ async function addOptimizerProfilesToComparison(inputProfiles) {
   try {
     for (const profile of profiles) {
       const config = comparisonConfigFromProfile(profile);
-      const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+      const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance, config.cashflow);
       if (state.comparison.items.some((item) => item.key === key)) continue;
       const result = await fetchComparisonResult(config);
       state.comparison.items.push(comparisonItemFromConfig(config, result));
@@ -3163,6 +3421,7 @@ function openComparisonEditor(mode = "new", config = currentComparisonConfig(), 
       assets: (config.assets || []).map((asset) => ({ id: String(asset.id || "").trim().toUpperCase() })),
       weights: [...(config.weights || [])],
       rebalance: { ...(config.rebalance || { mode: "none", threshold: 0.1 }) },
+      cashflow: normalizeCashflow(config.cashflow),
     },
   };
   renderComparisonEditor();
@@ -3189,6 +3448,9 @@ function renderComparisonEditor() {
   els.compareEditorNameInput.value = config.title || "";
   els.compareEditorRebalanceMode.value = config.rebalance?.mode || "none";
   els.compareEditorThresholdInput.value = Math.round(Number(config.rebalance?.threshold || 0.1) * 100);
+  const cashflow = normalizeCashflow(config.cashflow);
+  els.compareEditorContributionInput.value = Math.round(cashflow.contributionRate * 1000) / 10;
+  els.compareEditorCashflowMode.value = cashflow.mode;
   els.compareEditorSubmitBtn.textContent = editor.mode === "edit" ? t("updateCompareItem") : t("saveToCompare");
   els.compareEditorError.textContent = "";
   els.compareEditorAssets.innerHTML = config.assets
@@ -3226,6 +3488,10 @@ function syncComparisonEditorFromInputs() {
       mode: els.compareEditorRebalanceMode.value || "none",
       threshold: Number(els.compareEditorThresholdInput.value || 10) / 100,
     },
+    cashflow: normalizeCashflow({
+      mode: els.compareEditorCashflowMode.value || "none",
+      contributionRate: Number(els.compareEditorContributionInput.value || 0) / 100,
+    }),
   };
   return editor.config;
 }
@@ -3270,7 +3536,7 @@ async function submitComparisonEditor() {
     els.compareEditorError.textContent = t("invalidCompareConfig");
     return;
   }
-  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance);
+  const key = comparisonKeyForAssets(config.assets, config.weights, config.rebalance, config.cashflow);
   const duplicate = state.comparison.items.some((item) => item.key === key && item.key !== editor.key);
   if (duplicate) {
     els.compareEditorError.textContent = t("comparing");
@@ -3318,7 +3584,7 @@ function editComparisonItem(key) {
   openComparisonEditor("edit", comparisonConfigFromItem(item), key);
 }
 
-async function applyWeightsAndRebalance(weights, rebalance, assets = state.assets) {
+async function applyWeightsAndRebalance(weights, rebalance, assets = state.assets, cashflow = state.cashflow) {
   if (state.loading || state.optimizing) return;
   const scrollSnapshot = captureScrollState();
   state.assets = assets.map((asset, i) => ({
@@ -3329,6 +3595,7 @@ async function applyWeightsAndRebalance(weights, rebalance, assets = state.asset
     mode: rebalance.mode,
     threshold: rebalance.threshold,
   };
+  state.cashflow = normalizeCashflow(cashflow);
   els.thresholdInput.value = Math.round((state.rebalance.threshold || 0.1) * 100);
   renderAssets();
   renderModes();
@@ -3597,7 +3864,7 @@ function renderComparisonPanel(message = "") {
       return `
         <tr data-compare-key="${escapeHtml(entry.key)}" class="${rowClasses}">
           <td><strong><i class="comparison-drag-handle" aria-hidden="true">⋮⋮</i>${escapeHtml(displayTitle)}</strong><span>${escapeHtml(entry.weightsText)}</span></td>
-          <td>${escapeHtml(rebalanceLabel(entry.rebalance))}</td>
+          <td>${escapeHtml(portfolioRuleLabel(entry.rebalance, entry.cashflow))}</td>
           <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
           <td>${escapeHtml(fmtNum(metrics.sharpe0))}</td>
           <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
@@ -3662,7 +3929,7 @@ function renderComparisonPanel(message = "") {
       } else if (button.dataset.action === "edit") {
         editComparisonItem(item.key);
       } else {
-        applyWeightsAndRebalance(item.weights, item.rebalance, item.assets);
+        applyWeightsAndRebalance(item.weights, item.rebalance, item.assets, item.cashflow);
       }
     });
   });
@@ -4348,16 +4615,21 @@ async function optimize() {
   if (state.assets.length < 2 || state.loading || state.optimizing) return;
   const scrollSnapshot = captureScrollState();
   state.optimizing = true;
+  setOperationProgress("optimize", 0, "preparing");
   updateInteractionLocks();
   if (!state.optimizerProfiles.length) {
     els.optimizerResults.innerHTML = `<div class="status">${t("scanning")}</div>`;
   }
   restoreScrollState(scrollSnapshot);
   try {
-    const data = await api("/api/optimize", {
-      method: "POST",
-      body: JSON.stringify({ ...requestPayload(), optimize: optimizerRequestOptions() }),
-    });
+    const data = await streamApi(
+      "/api/optimize/stream",
+      {
+        method: "POST",
+        body: JSON.stringify({ ...requestPayload(), optimize: optimizerRequestOptions() }),
+      },
+      (event) => setOperationProgress("optimize", event.progress, event.stage, event.detail),
+    );
     state.optimizerSelectedKeys = [];
     state.optimizerFocusedKey = "";
     state.optimizerTagFilter = "";
@@ -4372,6 +4644,7 @@ async function optimize() {
     restoreScrollState(scrollSnapshot);
   } finally {
     state.optimizing = false;
+    clearOperationProgress("optimize");
     updateInteractionLocks();
     restoreScrollState(scrollSnapshot);
   }
@@ -4390,6 +4663,9 @@ function optimizerSummaryMarkup(summary) {
     [t("drawdownShort"), `${fmtPct(summary.drawdownRange?.[0])} - ${fmtPct(summary.drawdownRange?.[1])}`],
     [t("averageNavShort"), `${fmtMultiple(summary.averageNavRange?.[0])} - ${fmtMultiple(summary.averageNavRange?.[1])}`],
   ];
+  if (Number(summary.contributionRate || 0) > 0) {
+    cards.splice(6, 0, [t("contributionRate"), fmtPct(summary.contributionRate, 1)]);
+  }
   return `
     <section class="optimizer-summary">
       <div class="optimizer-summary-grid">
@@ -4444,7 +4720,7 @@ function optimizerSortValue(profile, key) {
   if (key === "averageNav") return Number(metrics.averageNav ?? -Infinity);
   if (key === "sharpe") return Number(metrics.sharpe0 ?? -Infinity);
   if (key === "volatility") return Number(metrics.volatility ?? Infinity);
-  if (key === "rebalance") return rebalanceLabel(profile.rebalance);
+  if (key === "rebalance") return portfolioRuleLabel(profile.rebalance, profile.cashflow);
   return Number(profile.score?.composite ?? -Infinity);
 }
 
@@ -4940,7 +5216,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
         <article class="optimizer-feature-card">
           <div class="opt-head">
             <strong>${escapeHtml(profileTitle(profile))}</strong>
-            <span class="muted">${escapeHtml(rebalanceLabel(profile.rebalance))}</span>
+            <span class="muted">${escapeHtml(portfolioRuleLabel(profile.rebalance, profile.cashflow))}</span>
           </div>
           ${optimizerTagsMarkup(profile)}
           <div class="optimizer-reason">${escapeHtml(profile.rankReason || "")}</div>
@@ -4969,7 +5245,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
           <td class="optimizer-select-cell"><input type="checkbox" data-select-profile="${escapeHtml(key)}" ${selected ? "checked" : ""} aria-label="${escapeHtml(t("selectCandidate"))}" /></td>
           <td><strong>${escapeHtml(profileTitle(profile))}</strong>${optimizerTagsMarkup(profile)}<span>${escapeHtml(profile.rankReason || "")}</span></td>
           <td>${escapeHtml(weightsText)}</td>
-          <td>${escapeHtml(rebalanceLabel(profile.rebalance))}</td>
+          <td>${escapeHtml(portfolioRuleLabel(profile.rebalance, profile.cashflow))}</td>
           <td>${escapeHtml(fmtPct(m.cagr))}</td>
           <td>${escapeHtml(fmtPct(m.maxDrawdown))}</td>
           <td>${escapeHtml(fmtMultiple(m.averageNav))}</td>
@@ -5101,7 +5377,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
     button.disabled = state.loading || state.optimizing;
     button.addEventListener("click", () => {
       if (button.dataset.action === "apply") {
-        applyWeightsAndRebalance(profile.weights, profile.rebalance, profile.assets || state.assets);
+        applyWeightsAndRebalance(profile.weights, profile.rebalance, profile.assets || state.assets, profile.cashflow);
       } else {
         addProfileToComparison(profile);
       }
@@ -5237,6 +5513,8 @@ function bindEvents() {
   els.compareEditorNameInput.addEventListener("input", syncComparisonEditorFromInputs);
   els.compareEditorRebalanceMode.addEventListener("change", syncComparisonEditorFromInputs);
   els.compareEditorThresholdInput.addEventListener("input", syncComparisonEditorFromInputs);
+  els.compareEditorContributionInput.addEventListener("input", syncComparisonEditorFromInputs);
+  els.compareEditorCashflowMode.addEventListener("change", syncComparisonEditorFromInputs);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.comparison.editor) closeComparisonEditor();
   });
@@ -5257,6 +5535,28 @@ function bindEvents() {
     saveState();
     scheduleRun();
   });
+  els.cashflowModeInput.addEventListener("change", () => {
+    if (state.loading) return;
+    const mode = els.cashflowModeInput.value || "none";
+    const currentRate = Number(els.cashflowContributionInput.value || 0) / 100;
+    state.cashflow = normalizeCashflow({
+      mode,
+      contributionRate: mode === "none" ? 0 : currentRate || 0.01,
+    });
+    renderCashflowControls();
+    saveState();
+    scheduleRun();
+  });
+  els.cashflowContributionInput.addEventListener("input", () => {
+    if (state.loading) return;
+    state.cashflow = normalizeCashflow({
+      mode: els.cashflowModeInput.value || "none",
+      contributionRate: Number(els.cashflowContributionInput.value || 0) / 100,
+    });
+    saveState();
+    scheduleRun();
+  });
+  els.cashflowContributionInput.addEventListener("change", renderCashflowControls);
   els.startInput.addEventListener("change", () => {
     saveState();
     runBacktest(true);

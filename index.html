@@ -9,7 +9,7 @@
         document.documentElement.classList.add("share-boot");
       }
     </script>
-    <link rel="stylesheet" href="/styles.css?v=20260623-share-snapshot" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-scan-progress" />
   </head>
   <body>
     <div id="authOverlay" class="auth-overlay">
@@ -68,6 +68,21 @@
             <input id="thresholdInput" type="number" min="1" max="50" step="1" value="20" />
             <span>%</span>
           </label>
+          <div class="date-grid cashflow-grid">
+            <label>
+              <span data-i18n="cashflowStrategy">现金流买入</span>
+              <select id="cashflowModeInput">
+                <option value="none" data-i18n="cashflowNone">无现金流</option>
+                <option value="target" data-i18n="cashflowTarget">按目标比例</option>
+                <option value="underweight" data-i18n="cashflowUnderweight">补低配</option>
+                <option value="drift" data-i18n="cashflowDrift">跟随漂移</option>
+              </select>
+            </label>
+            <label>
+              <span data-i18n="contributionRate">月定投 (%)</span>
+              <input id="cashflowContributionInput" type="number" min="0" max="20" step="0.5" value="0" />
+            </label>
+          </div>
           <div class="date-grid">
             <label>
               <span data-i18n="start">开始</span>
@@ -111,6 +126,10 @@
               <span data-i18n="resultCount">返回数量</span>
               <input id="optimizerLimitInput" type="number" min="8" max="60" step="4" value="24" />
             </label>
+            <label title="每月投入金额占初始本金的比例" data-i18n-title="contributionRateHint">
+              <span data-i18n="contributionRate">月定投</span>
+              <input id="optimizerContributionInput" type="number" min="0" max="20" step="0.5" value="0" />
+            </label>
           </div>
           <div class="optimizer-rule-controls" aria-label="扫描再平衡规则">
             <label><input type="checkbox" data-optimizer-rule="none" checked /><span data-i18n="rebalanceNone">不再平衡</span></label>
@@ -118,6 +137,12 @@
             <label><input type="checkbox" data-optimizer-rule="quarterly" checked /><span data-i18n="rebalanceQuarterly">每季</span></label>
             <label><input type="checkbox" data-optimizer-rule="threshold" checked /><span data-i18n="rebalanceThreshold">阈值</span></label>
             <label><input type="checkbox" data-optimizer-rule="monthly" /><span data-i18n="rebalanceMonthly">每月</span></label>
+          </div>
+          <div class="optimizer-rule-controls optimizer-cashflow-controls" aria-label="扫描现金流买入策略">
+            <span class="optimizer-control-caption" data-i18n="cashflowStrategy">现金流买入</span>
+            <label><input type="checkbox" data-optimizer-cashflow="target" checked /><span data-i18n="cashflowTarget">按目标比例</span></label>
+            <label><input type="checkbox" data-optimizer-cashflow="underweight" checked /><span data-i18n="cashflowUnderweight">补低配</span></label>
+            <label><input type="checkbox" data-optimizer-cashflow="drift" checked /><span data-i18n="cashflowDrift">跟随漂移</span></label>
           </div>
         </section>
       </aside>
@@ -161,7 +186,13 @@
         <section class="chart-panel">
           <canvas id="equityCanvas" width="1200" height="560"></canvas>
           <div id="tooltip" class="tooltip"></div>
-          <div id="chartLoading" class="chart-loading" aria-live="polite" data-i18n="backtesting">回测中</div>
+          <div id="chartLoading" class="chart-loading" aria-live="polite">
+            <strong id="operationProgressLabel" data-i18n="backtesting">回测中</strong>
+            <div id="operationProgressBar" class="operation-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="operationProgressFill"></span>
+            </div>
+            <span id="operationProgressPercent" class="operation-progress-percent">0%</span>
+          </div>
         </section>
 
         <section id="comparisonPanel" class="comparison-panel" hidden></section>
@@ -282,6 +313,19 @@
             <span data-i18n="threshold">阈值</span>
             <input id="compareEditorThresholdInput" type="number" min="1" max="50" step="1" value="20" />
           </label>
+          <label>
+            <span data-i18n="contributionRate">月定投</span>
+            <input id="compareEditorContributionInput" type="number" min="0" max="20" step="0.5" value="0" />
+          </label>
+          <label>
+            <span data-i18n="cashflowStrategy">现金流买入</span>
+            <select id="compareEditorCashflowMode">
+              <option value="none" data-i18n="cashflowNone">无现金流</option>
+              <option value="target" data-i18n="cashflowTarget">按目标比例</option>
+              <option value="underweight" data-i18n="cashflowUnderweight">补低配</option>
+              <option value="drift" data-i18n="cashflowDrift">跟随漂移</option>
+            </select>
+          </label>
         </div>
         <div id="compareEditorError" class="compare-editor-error"></div>
         <div class="compare-editor-actions">
@@ -290,6 +334,6 @@
         </div>
       </form>
     </div>
-    <script src="/app.js?v=20260703-compare-sharpe"></script>
+    <script src="/app.js?v=20260715-scan-progress"></script>
   </body>
 </html>

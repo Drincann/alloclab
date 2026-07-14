@@ -1078,6 +1078,7 @@ h2 {
 .search-box input,
 .favorite-name,
 .date-grid input,
+.date-grid select,
 .field-row input {
   width: 100%;
   border: 1px solid var(--line);
@@ -1086,6 +1087,11 @@ h2 {
   padding: 0 10px;
   background: var(--input-bg);
   color: var(--ink);
+}
+
+.cashflow-grid {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .search-results {
@@ -1384,12 +1390,48 @@ body.share-loading #equityCanvas {
 
 .chart-loading::before {
   content: "";
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border: 3px solid color-mix(in srgb, var(--accent) 18%, transparent);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: chart-loading-spin 0.85s linear infinite;
+}
+
+.chart-loading > strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.operation-progress-track {
+  width: min(320px, 62%);
+  height: 6px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--panel-alt) 78%, transparent);
+}
+
+.operation-progress-track > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.operation-progress-percent {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-loading.share-progress .operation-progress-track,
+.chart-loading.share-progress .operation-progress-percent,
+html.share-boot #chartLoading .operation-progress-track,
+html.share-boot #chartLoading .operation-progress-percent,
+html.share-boot #operationProgressLabel {
+  display: none;
 }
 
 @keyframes chart-loading-spin {
@@ -2233,6 +2275,18 @@ html.share-boot #chartLoading::after {
   height: 13px;
   margin: 0;
   accent-color: var(--accent);
+}
+
+.optimizer-cashflow-controls {
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.optimizer-control-caption {
+  flex: 0 0 100%;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .optimizer-section-title {

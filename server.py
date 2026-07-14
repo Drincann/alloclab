@@ -13,7 +13,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,10 +27,32 @@ PYDEPS = WORK_DIR / "pydeps"
 if PYDEPS.exists():
     sys.path.insert(0, str(PYDEPS))
 
+ak = None
+AKSHARE_IMPORT_ATTEMPTED = False
+AKSHARE_IMPORT_LOCK = threading.Lock()
+
+
+def get_akshare():
+    global ak, AKSHARE_IMPORT_ATTEMPTED
+    if AKSHARE_IMPORT_ATTEMPTED:
+        return ak
+    with AKSHARE_IMPORT_LOCK:
+        if AKSHARE_IMPORT_ATTEMPTED:
+            return ak
+        try:
+            import akshare as imported_akshare
+
+            ak = imported_akshare
+        except Exception:
+            ak = None
+        AKSHARE_IMPORT_ATTEMPTED = True
+    return ak
+
+
 try:
-    import akshare as ak
+    import numpy as np
 except Exception:
-    ak = None
+    np = None
 
 
 CATALOG = [
@@ -185,12 +208,18 @@ SHARE_DIR = APP_DIR / "data" / "shares"
 MARKET_CACHE_DIR = APP_DIR / "data" / "market_cache"
 SEARCH_CACHE = {}
 OPTIMIZE_CACHE = {}
+OPTIMIZE_WORKER_STATE = None
 FUND_LIST_CACHE = None
 FUND_LIST_LOADING = False
 FUND_LIST_ERROR = None
 FUND_PROFILE_CACHE = {}
 PROVIDER_MEMORY_CACHE = {}
 PROVIDER_CACHE_LOCK = threading.Lock()
+SCAN_WORKERS_ENV = "ALLOCLAB_SCAN_WORKERS"
+SCAN_ENGINE_ENV = "ALLOCLAB_SCAN_ENGINE"
+SCAN_BATCH_SIZE_ENV = "ALLOCLAB_SCAN_BATCH_SIZE"
+MIN_PARALLEL_SCAN_EVALUATIONS = 2000
+MIN_NUMPY_WORK_PER_PROCESS = 20_000_000
 YAHOO_SEARCH_DISABLED_UNTIL = 0
 YAHOO_SEARCH_COOLDOWN_SECONDS = 5 * 60
 MIN_BACKTEST_DAYS = 30
@@ -846,10 +875,11 @@ def load_fund_catalog_seed():
 
 
 def fetch_fund_catalog_remote():
-    if ak is None:
+    akshare = get_akshare()
+    if akshare is None:
         return []
     started = time.time()
-    df = ak.fund_name_em()
+    df = akshare.fund_name_em()
     rows = []
     for _, row in df.iterrows():
         code = str(row.get("基金代码", "")).strip()
@@ -894,7 +924,7 @@ def start_fund_catalog_load():
     if FUND_LIST_LOADING:
         return
     load_fund_catalog_seed()
-    if ak is None:
+    if get_akshare() is None:
         return
     FUND_LIST_LOADING = True
 
@@ -1238,9 +1268,10 @@ def search_assets(query):
     return completed_items
 
 def fetch_csindex_uncached(symbol):
-    if ak is None:
+    akshare = get_akshare()
+    if akshare is None:
         raise RuntimeError("AKShare 不可用，请先安装到 work/pydeps。")
-    df = ak.stock_zh_index_hist_csindex(
+    df = akshare.stock_zh_index_hist_csindex(
         symbol=symbol, start_date="20000101", end_date="20991231"
     )
     rows = []
@@ -1521,12 +1552,56 @@ def max_drawdown(values):
 
 
 def annualized_vol(values):
-    returns = pct_change(values)
+    return annualized_vol_from_returns(pct_change(values))
+
+
+def annualized_vol_from_returns(returns):
     if len(returns) < 2:
         return 0
     mean = sum(returns) / len(returns)
     var = sum((ret - mean) ** 2 for ret in returns) / (len(returns) - 1)
     return math.sqrt(var * 252)
+
+
+def max_drawdown_value(values):
+    peak = values[0]
+    max_dd = 0.0
+    for value in values:
+        if value > peak:
+            peak = value
+        dd = value / peak - 1
+        if dd < max_dd:
+            max_dd = dd
+    return max_dd
+
+
+def build_simulation_context(dates, prices=None):
+    month_end = []
+    quarter_end = []
+    year_end = []
+    last_index = len(dates) - 1
+    for index, date in enumerate(dates):
+        if index == last_index:
+            month_end.append(False)
+            quarter_end.append(False)
+            year_end.append(False)
+            continue
+        next_date = dates[index + 1]
+        is_year_end = date[:4] != next_date[:4]
+        is_month_end = date[:7] != next_date[:7]
+        quarter = (int(date[5:7]) - 1) // 3
+        next_quarter = (int(next_date[5:7]) - 1) // 3
+        month_end.append(is_month_end)
+        quarter_end.append(is_year_end or quarter != next_quarter)
+        year_end.append(is_year_end)
+    context = {
+        "monthEnd": month_end,
+        "quarterEnd": quarter_end,
+        "yearEnd": year_end,
+    }
+    if prices is not None:
+        context["priceRows"] = list(zip(*prices))
+    return context
 
 
 def years_between(start, end):
@@ -1609,6 +1684,70 @@ def should_rebalance(mode, threshold, dates, t, target_weights, units, prices, v
         )
     raise ValueError(f"未知再平衡模式：{mode}")
 
+def clean_cashflow(raw_cashflow):
+    raw_cashflow = raw_cashflow if isinstance(raw_cashflow, dict) else {}
+    mode = str(raw_cashflow.get("mode") or "none")
+    if mode not in {"none", "target", "underweight", "drift"}:
+        mode = "none"
+    contribution_rate = normalize_ratio_option(raw_cashflow.get("contributionRate"), 0.0, 0.0, 0.20)
+    if contribution_rate <= 0:
+        mode = "none"
+        contribution_rate = 0.0
+    return {"mode": mode, "contributionRate": contribution_rate, "frequency": "monthly"}
+
+
+def cashflow_label(cashflow):
+    mode = (cashflow or {}).get("mode", "none")
+    rate = float((cashflow or {}).get("contributionRate") or 0)
+    if mode == "none" or rate <= 0:
+        return "no cashflow"
+    labels = {
+        "target": "按目标比例定投",
+        "underweight": "补低配定投",
+        "drift": "跟随漂移定投",
+    }
+    return f"{labels.get(mode, mode)} {rate * 100:.1f}%/月"
+
+
+def should_contribute(cashflow, dates, t):
+    if not cashflow or cashflow.get("mode") == "none" or float(cashflow.get("contributionRate") or 0) <= 0:
+        return False
+    return t < len(dates) - 1 and dates[t][:7] != dates[t + 1][:7]
+
+
+def allocate_contribution(mode, amount, target_weights, units, prices_at_t, cash):
+    if amount <= 0:
+        return [0 for _ in target_weights], 0
+    asset_values = [units[i] * prices_at_t[i] for i in range(len(target_weights))]
+    current_value = cash + sum(asset_values)
+    cash_target = 1 - sum(target_weights)
+
+    if mode == "drift" and current_value > 0:
+        asset_allocations = [amount * value / current_value for value in asset_values]
+        cash_allocation = amount * cash / current_value
+        return asset_allocations, cash_allocation
+
+    if mode == "underweight":
+        post_value = current_value + amount
+        deficits = [
+            max(0.0, post_value * target_weights[i] - asset_values[i])
+            for i in range(len(target_weights))
+        ]
+        cash_deficit = max(0.0, post_value * cash_target - cash)
+        total_deficit = sum(deficits) + cash_deficit
+        if total_deficit > 0:
+            used = min(amount, total_deficit)
+            asset_allocations = [used * deficit / total_deficit for deficit in deficits]
+            cash_allocation = used * cash_deficit / total_deficit
+            remainder = amount - used
+            if remainder > 0:
+                cash_allocation += remainder
+            return asset_allocations, cash_allocation
+
+    asset_allocations = [amount * weight for weight in target_weights]
+    cash_allocation = amount * cash_target
+    return asset_allocations, cash_allocation
+
 
 def compute_metrics(dates, nav, rebalances):
     total = nav[-1] / nav[0] - 1
@@ -1647,6 +1786,28 @@ def compute_metrics(dates, nav, rebalances):
     }, drawdowns
 
 
+def compute_scan_metrics(dates, nav, rebalance_count):
+    total = nav[-1] / nav[0] - 1
+    years = years_between(dates[0], dates[-1])
+    cagr = nav[-1] ** (1 / years) - 1 if years > 0 else 0
+    returns = pct_change(nav)
+    vol = annualized_vol_from_returns(returns)
+    mdd = max_drawdown_value(nav)
+    return {
+        "start": dates[0],
+        "end": dates[-1],
+        "years": years,
+        "totalReturn": total,
+        "cagr": cagr,
+        "volatility": vol,
+        "maxDrawdown": mdd,
+        "sharpe0": cagr / vol if vol else None,
+        "calmar": cagr / abs(mdd) if mdd else None,
+        "averageNav": sum(nav) / len(nav),
+        "rebalanceCount": rebalance_count,
+    }
+
+
 def correlation_matrix(prices):
     returns = [pct_change(values) for values in prices]
     matrix = []
@@ -1663,58 +1824,158 @@ def correlation_matrix(prices):
     return matrix
 
 
-def simulate_portfolio(dates, prices, target_weights, rebalance, collect_details=True):
+def simulate_portfolio(
+    dates,
+    prices,
+    target_weights,
+    rebalance,
+    collect_details=True,
+    cashflow=None,
+    simulation_context=None,
+    metrics_mode="full",
+    progress=None,
+):
     if any(weight < 0 for weight in target_weights):
         raise ValueError("暂不支持做空权重。")
     if sum(target_weights) <= 0:
         raise ValueError("权重合计必须大于 0。")
-    units = [target_weights[i] / prices[i][0] for i in range(len(target_weights))]
-    cash = 1 - sum(target_weights)
+    cashflow = clean_cashflow(cashflow)
+    simulation_context = simulation_context or build_simulation_context(dates, prices)
+    price_rows = simulation_context.get("priceRows") or list(zip(*prices))
+    asset_count = len(target_weights)
+    weight_sum = sum(target_weights)
+    units = [target_weights[i] / prices[i][0] for i in range(asset_count)]
+    cash = 1 - weight_sum
     mode = rebalance.get("mode", "annual")
+    if mode not in {"none", "monthly", "quarterly", "annual", "threshold"}:
+        raise ValueError(f"未知再平衡模式：{mode}")
     threshold = float(rebalance.get("threshold", 0.10))
     nav = []
     rebalances = []
+    rebalance_count = 0
+    cashflow_count = 0
+    cashflow_total = 0.0
     weights_timeline = []
+    nav_index = 1.0
+    previous_account_value = cash + sum(units[i] * prices[i][0] for i in range(asset_count))
+    monthly_contribution = float(cashflow.get("contributionRate") or 0)
+    cashflow_enabled = cashflow.get("mode") != "none" and monthly_contribution > 0
+    month_end = simulation_context["monthEnd"]
+    scheduled_rebalances = {
+        "monthly": month_end,
+        "quarterly": simulation_context["quarterEnd"],
+        "annual": simulation_context["yearEnd"],
+    }
+    progress_step = max(1, len(dates) // 40)
 
     for t, date in enumerate(dates):
-        value = cash + sum(units[i] * prices[i][t] for i in range(len(target_weights)))
+        if progress and (t == 0 or t % progress_step == 0):
+            progress(t / len(dates))
+        prices_at_t = price_rows[t]
+        value = cash + sum(units[i] * prices_at_t[i] for i in range(asset_count))
         if value <= 0:
             raise ValueError(f"组合净值在 {date} 跌至 0 或以下，请降低杠杆。")
-        current_weights = [
-            units[i] * prices[i][t] / value for i in range(len(target_weights))
-        ]
-        nav.append(value)
+        if t == 0:
+            nav_index = 1.0
+        else:
+            nav_index *= value / previous_account_value
+        nav.append(nav_index)
         if collect_details:
+            current_weights = [
+                units[i] * prices_at_t[i] / value for i in range(asset_count)
+            ]
             weights_timeline.append(current_weights)
-        if should_rebalance(mode, threshold, dates, t, target_weights, units, prices, value):
-            event = {"date": date, "nav": value}
-            if collect_details:
-                event.update({"before": current_weights, "after": target_weights})
-            rebalances.append(event)
-            units = [value * target_weights[i] / prices[i][t] for i in range(len(target_weights))]
-            cash = value * (1 - sum(target_weights))
+        if cashflow_enabled and month_end[t]:
+            asset_allocations, cash_allocation = allocate_contribution(
+                cashflow["mode"],
+                monthly_contribution,
+                target_weights,
+                units,
+                prices_at_t,
+                cash,
+            )
+            for i, amount in enumerate(asset_allocations):
+                units[i] += amount / prices_at_t[i]
+            cash += cash_allocation
+            cashflow_count += 1
+            cashflow_total += monthly_contribution
+            value = cash + sum(units[i] * prices_at_t[i] for i in range(asset_count))
+        if mode == "threshold":
+            rebalance_due = t < len(dates) - 1 and any(
+                abs((units[i] * prices_at_t[i] / value) - target_weights[i]) >= threshold
+                for i in range(asset_count)
+            )
+        elif mode == "none":
+            rebalance_due = False
+        else:
+            rebalance_due = scheduled_rebalances[mode][t]
+        if rebalance_due:
+            rebalance_count += 1
+            if metrics_mode == "full":
+                event = {"date": date, "nav": nav_index}
+                if collect_details:
+                    before_rebalance = [
+                        units[i] * prices_at_t[i] / value for i in range(asset_count)
+                    ]
+                    event.update({"before": before_rebalance, "after": target_weights})
+                rebalances.append(event)
+            units = [value * target_weights[i] / prices_at_t[i] for i in range(asset_count)]
+            cash = value * (1 - weight_sum)
+            value = cash + sum(units[i] * prices_at_t[i] for i in range(asset_count))
+        previous_account_value = value
 
-    metrics, drawdowns = compute_metrics(dates, nav, rebalances)
+    if progress:
+        progress(1.0)
+    if metrics_mode == "scan":
+        metrics = compute_scan_metrics(dates, nav, rebalance_count)
+        drawdowns = []
+    else:
+        metrics, drawdowns = compute_metrics(dates, nav, rebalances)
+    metrics["cashflowCount"] = cashflow_count
+    metrics["cashflowTotal"] = cashflow_total
+    metrics["cashflowMode"] = cashflow["mode"]
     return metrics, drawdowns, nav, rebalances, weights_timeline
 
-
-def backtest_portfolio(asset_ids, weights, rebalance, start=None, end=None):
-    series_list = [get_series(asset_id) for asset_id in asset_ids]
+def backtest_portfolio(asset_ids, weights, rebalance, start=None, end=None, cashflow=None, progress=None):
+    if progress:
+        progress(0.02, "preparing")
+    series_list = []
+    for index, asset_id in enumerate(asset_ids):
+        if progress:
+            progress(0.05 + (index / max(1, len(asset_ids))) * 0.40, "market", asset_id)
+        series_list.append(get_series(asset_id))
+    if progress:
+        progress(0.48, "align")
     dates, prices = align_series(series_list, start, end)
+    simulation_context = build_simulation_context(dates, prices)
     target_weights = [weight / 100 for weight in weights]
+    cashflow = clean_cashflow(cashflow)
     metrics, drawdowns, nav, rebalances, weights_timeline = simulate_portfolio(
-        dates, prices, target_weights, rebalance, collect_details=True
+        dates,
+        prices,
+        target_weights,
+        rebalance,
+        collect_details=True,
+        cashflow=cashflow,
+        simulation_context=simulation_context,
+        progress=(lambda value: progress(0.52 + value * 0.24, "simulate")) if progress else None,
     )
+    if progress:
+        progress(0.78, "metrics")
     corr = correlation_matrix(prices)
     normalized_assets = [
         [price / asset_prices[0] for price in asset_prices] for asset_prices in prices
     ]
     asset_stats = []
-    for asset_id, asset_prices, asset_nav in zip(asset_ids, prices, normalized_assets):
+    for index, (asset_id, asset_prices, asset_nav) in enumerate(zip(asset_ids, prices, normalized_assets)):
+        if progress:
+            progress(0.82 + (index / max(1, len(asset_ids))) * 0.14, "metrics", asset_id)
         asset_metrics, _ = compute_metrics(dates, asset_nav, [])
         meta = get_asset_meta(asset_id)
         asset_stats.append({"id": asset_id, "name": meta["name"], **asset_metrics})
 
+    if progress:
+        progress(0.98, "finalize")
     return {
         "assets": [
             {**get_asset_meta(asset_id), "weight": target_weights[i]}
@@ -1725,6 +1986,7 @@ def backtest_portfolio(asset_ids, weights, rebalance, start=None, end=None):
         "drawdowns": drawdowns,
         "weightsTimeline": weights_timeline,
         "rebalanceEvents": rebalances,
+        "cashflow": cashflow,
         "metrics": metrics,
         "correlation": corr,
         "assetSeries": normalized_assets,
@@ -1805,6 +2067,21 @@ def clean_optimize_options(raw_options, asset_count):
         rebalance_modes = ["annual", "none", "quarterly", "threshold"]
     if not rebalance_modes:
         rebalance_modes = ["annual", "none", "quarterly", "threshold"]
+    contribution_rate = normalize_ratio_option(raw_options.get("contributionRate"), 0.0, 0.0, 0.20)
+    raw_cashflow_strategies = raw_options.get("cashflowStrategies")
+    if isinstance(raw_cashflow_strategies, list):
+        cashflow_strategies = [
+            str(mode)
+            for mode in raw_cashflow_strategies
+            if str(mode) in {"target", "underweight", "drift"}
+        ]
+    else:
+        cashflow_strategies = ["target", "underweight", "drift"]
+    if contribution_rate <= 0:
+        cashflow_strategies = ["none"]
+        contribution_rate = 0.0
+    elif not cashflow_strategies:
+        cashflow_strategies = ["target", "underweight", "drift"]
 
     return {
         "step": step,
@@ -1813,22 +2090,364 @@ def clean_optimize_options(raw_options, asset_count):
         "maxDrawdown": max_drawdown,
         "limit": result_limit,
         "rebalanceModes": rebalance_modes,
+        "contributionRate": contribution_rate,
+        "cashflowStrategies": cashflow_strategies,
     }
 
 
-def optimize_portfolio(asset_ids, start=None, end=None, options=None):
+def optimize_worker_count(total_evaluations, weight_count):
+    if total_evaluations < MIN_PARALLEL_SCAN_EVALUATIONS or weight_count < 2:
+        return 1
+    default_workers = max(1, (os.cpu_count() or 1) - 1)
+    try:
+        configured_workers = int(os.environ.get(SCAN_WORKERS_ENV, default_workers))
+    except (TypeError, ValueError):
+        configured_workers = default_workers
+    return max(1, min(configured_workers, weight_count))
+
+
+def split_weight_chunks(weight_grids, chunk_count):
+    if not weight_grids:
+        return []
+    chunk_size = max(1, math.ceil(len(weight_grids) / max(1, chunk_count)))
+    return [
+        weight_grids[start : start + chunk_size]
+        for start in range(0, len(weight_grids), chunk_size)
+    ]
+
+
+def evaluate_optimize_weight_chunk(
+    dates,
+    prices,
+    weight_chunk,
+    rules,
+    cashflow_rules,
+    max_drawdown,
+    simulation_context=None,
+):
+    simulation_context = simulation_context or build_simulation_context(dates, prices)
+    completed_count = 0
+    evaluated_count = 0
+    rows = []
+    for weights in weight_chunk:
+        for rule_index, rule in enumerate(rules):
+            for cashflow_index, cashflow in enumerate(cashflow_rules):
+                try:
+                    metrics, _, _, _, _ = simulate_portfolio(
+                        dates,
+                        prices,
+                        weights,
+                        rule,
+                        collect_details=False,
+                        cashflow=cashflow,
+                        simulation_context=simulation_context,
+                        metrics_mode="scan",
+                    )
+                except ValueError:
+                    metrics = None
+                completed_count += 1
+                if metrics is None:
+                    continue
+                evaluated_count += 1
+                if max_drawdown is not None and metrics["maxDrawdown"] < -max_drawdown:
+                    continue
+                rows.append((weights, rule_index, cashflow_index, metrics))
+    return completed_count, evaluated_count, rows
+
+
+def evaluate_optimize_numpy_chunk(
+    dates,
+    prices,
+    weight_chunk,
+    rules,
+    cashflow_rules,
+    max_drawdown,
+    simulation_context=None,
+    progress=None,
+):
+    if np is None:
+        raise RuntimeError("NumPy scan engine is unavailable")
+    simulation_context = simulation_context or build_simulation_context(dates, prices)
+    weight_count = len(weight_chunk)
+    rules_per_weight = len(rules) * len(cashflow_rules)
+    completed_count = weight_count * rules_per_weight
+    if completed_count == 0:
+        return 0, 0, []
+
+    base_weights = np.asarray(weight_chunk, dtype=np.float64)
+    weights = np.repeat(base_weights, rules_per_weight, axis=0)
+    rule_indices = np.tile(
+        np.repeat(np.arange(len(rules), dtype=np.int32), len(cashflow_rules)),
+        weight_count,
+    )
+    cashflow_indices = np.tile(
+        np.arange(len(cashflow_rules), dtype=np.int32),
+        weight_count * len(rules),
+    )
+    rule_mode_map = {"none": 0, "monthly": 1, "quarterly": 2, "annual": 3, "threshold": 4}
+    cashflow_mode_map = {"none": 0, "target": 1, "underweight": 2, "drift": 3}
+    rule_modes = np.asarray([rule_mode_map[rule["mode"]] for rule in rules], dtype=np.int8)[rule_indices]
+    thresholds = np.asarray([float(rule.get("threshold", 0.10)) for rule in rules], dtype=np.float64)[
+        rule_indices
+    ]
+    cashflow_modes = np.asarray(
+        [cashflow_mode_map[cashflow["mode"]] for cashflow in cashflow_rules], dtype=np.int8
+    )[cashflow_indices]
+    contribution_rates = np.asarray(
+        [float(cashflow.get("contributionRate") or 0) for cashflow in cashflow_rules], dtype=np.float64
+    )[cashflow_indices]
+    cashflow_enabled = (cashflow_modes != 0) & (contribution_rates > 0)
+
+    price_array = np.asarray(prices, dtype=np.float64)
+    asset_count = weights.shape[1]
+    evaluation_count = weights.shape[0]
+    weight_sums = np.zeros(evaluation_count, dtype=np.float64)
+    for asset_index in range(asset_count):
+        weight_sums += weights[:, asset_index]
+    units = weights / price_array[:, 0]
+    cash = 1.0 - weight_sums
+    nav = np.ones(evaluation_count, dtype=np.float64)
+    nav_sum = np.zeros(evaluation_count, dtype=np.float64)
+    nav_peak = np.ones(evaluation_count, dtype=np.float64)
+    max_drawdowns = np.zeros(evaluation_count, dtype=np.float64)
+    return_means = np.zeros(evaluation_count, dtype=np.float64)
+    return_m2 = np.zeros(evaluation_count, dtype=np.float64)
+    rebalance_counts = np.zeros(evaluation_count, dtype=np.int32)
+    cashflow_counts = np.zeros(evaluation_count, dtype=np.int32)
+    cashflow_totals = np.zeros(evaluation_count, dtype=np.float64)
+
+    previous_values = cash.copy()
+    first_prices = price_array[:, 0]
+    for asset_index in range(asset_count):
+        previous_values += units[:, asset_index] * first_prices[asset_index]
+
+    month_end = np.asarray(simulation_context["monthEnd"], dtype=bool)
+    quarter_end = np.asarray(simulation_context["quarterEnd"], dtype=bool)
+    year_end = np.asarray(simulation_context["yearEnd"], dtype=bool)
+    last_index = len(dates) - 1
+    progress_step = max(1, len(dates) // 100)
+    return_count = 0
+
+    for date_index in range(len(dates)):
+        if progress and (date_index == 0 or date_index % progress_step == 0):
+            progress(date_index / len(dates))
+        prices_at_t = price_array[:, date_index]
+        values = cash.copy()
+        for asset_index in range(asset_count):
+            values += units[:, asset_index] * prices_at_t[asset_index]
+        if np.any(values <= 0):
+            raise ValueError(f"Portfolio value fell to zero or below on {dates[date_index]}")
+
+        if date_index > 0:
+            growth_factors = values / previous_values
+            daily_returns = growth_factors - 1.0
+            nav *= growth_factors
+            return_count += 1
+            delta = daily_returns - return_means
+            return_means += delta / return_count
+            return_m2 += delta * (daily_returns - return_means)
+        nav_sum += nav
+        nav_peak = np.maximum(nav_peak, nav)
+        max_drawdowns = np.minimum(max_drawdowns, nav / nav_peak - 1.0)
+
+        if month_end[date_index] and np.any(cashflow_enabled):
+            for cashflow_mode in (1, 2, 3):
+                row_indices = np.flatnonzero(cashflow_enabled & (cashflow_modes == cashflow_mode))
+                if row_indices.size == 0:
+                    continue
+                amounts = contribution_rates[row_indices]
+                selected_weights = weights[row_indices]
+                selected_units = units[row_indices]
+                selected_cash = cash[row_indices]
+                selected_values = values[row_indices]
+                selected_weight_sums = weight_sums[row_indices]
+                selected_asset_values = selected_units * prices_at_t
+
+                if cashflow_mode == 3:
+                    asset_allocations = amounts[:, None] * selected_asset_values / selected_values[:, None]
+                    cash_allocations = amounts * selected_cash / selected_values
+                elif cashflow_mode == 2:
+                    post_values = selected_values + amounts
+                    deficits = np.maximum(
+                        0.0,
+                        post_values[:, None] * selected_weights - selected_asset_values,
+                    )
+                    cash_deficits = np.maximum(
+                        0.0,
+                        post_values * (1.0 - selected_weight_sums) - selected_cash,
+                    )
+                    total_deficits = cash_deficits.copy()
+                    for asset_index in range(asset_count):
+                        total_deficits += deficits[:, asset_index]
+                    positive = total_deficits > 0
+                    used = np.minimum(amounts, total_deficits)
+                    asset_allocations = amounts[:, None] * selected_weights
+                    cash_allocations = amounts * (1.0 - selected_weight_sums)
+                    if np.any(positive):
+                        positive_indices = np.flatnonzero(positive)
+                        positive_totals = total_deficits[positive_indices]
+                        positive_used = used[positive_indices]
+                        asset_allocations[positive_indices] = (
+                            positive_used[:, None]
+                            * deficits[positive_indices]
+                            / positive_totals[:, None]
+                        )
+                        cash_allocations[positive_indices] = (
+                            positive_used
+                            * cash_deficits[positive_indices]
+                            / positive_totals
+                            + amounts[positive_indices]
+                            - positive_used
+                        )
+                else:
+                    asset_allocations = amounts[:, None] * selected_weights
+                    cash_allocations = amounts * (1.0 - selected_weight_sums)
+
+                units[row_indices] += asset_allocations / prices_at_t
+                cash[row_indices] += cash_allocations
+                cashflow_counts[row_indices] += 1
+                cashflow_totals[row_indices] += amounts
+
+            values = cash.copy()
+            for asset_index in range(asset_count):
+                values += units[:, asset_index] * prices_at_t[asset_index]
+
+        rebalance_due = np.zeros(evaluation_count, dtype=bool)
+        if date_index < last_index:
+            if month_end[date_index]:
+                rebalance_due |= rule_modes == 1
+            if quarter_end[date_index]:
+                rebalance_due |= rule_modes == 2
+            if year_end[date_index]:
+                rebalance_due |= rule_modes == 3
+            threshold_rows = rule_modes == 4
+            if np.any(threshold_rows):
+                threshold_due = np.zeros(evaluation_count, dtype=bool)
+                for asset_index in range(asset_count):
+                    current_weights = units[:, asset_index] * prices_at_t[asset_index] / values
+                    threshold_due |= np.abs(current_weights - weights[:, asset_index]) >= thresholds
+                rebalance_due |= threshold_rows & threshold_due
+
+        if np.any(rebalance_due):
+            row_indices = np.flatnonzero(rebalance_due)
+            rebalance_counts[row_indices] += 1
+            units[row_indices] = (
+                values[row_indices, None] * weights[row_indices] / prices_at_t
+            )
+            cash[row_indices] = values[row_indices] * (1.0 - weight_sums[row_indices])
+            rebalanced_values = cash[row_indices].copy()
+            for asset_index in range(asset_count):
+                rebalanced_values += units[row_indices, asset_index] * prices_at_t[asset_index]
+            values[row_indices] = rebalanced_values
+        previous_values = values
+
+    if progress:
+        progress(1.0)
+    years = years_between(dates[0], dates[-1])
+    total_returns = nav - 1.0
+    cagrs = np.power(nav, 1.0 / years) - 1.0 if years > 0 else np.zeros_like(nav)
+    if return_count >= 2:
+        volatilities = np.sqrt((return_m2 / (return_count - 1)) * 252.0)
+    else:
+        volatilities = np.zeros_like(nav)
+    average_navs = nav_sum / len(dates)
+    rows = []
+    for row_index in range(evaluation_count):
+        max_drawdown_value_at_row = float(max_drawdowns[row_index])
+        if max_drawdown is not None and max_drawdown_value_at_row < -max_drawdown:
+            continue
+        volatility = float(volatilities[row_index])
+        cagr = float(cagrs[row_index])
+        metrics = {
+            "start": dates[0],
+            "end": dates[-1],
+            "years": years,
+            "totalReturn": float(total_returns[row_index]),
+            "cagr": cagr,
+            "volatility": volatility,
+            "maxDrawdown": max_drawdown_value_at_row,
+            "sharpe0": cagr / volatility if volatility else None,
+            "calmar": cagr / abs(max_drawdown_value_at_row) if max_drawdown_value_at_row else None,
+            "averageNav": float(average_navs[row_index]),
+            "rebalanceCount": int(rebalance_counts[row_index]),
+            "cashflowCount": int(cashflow_counts[row_index]),
+            "cashflowTotal": float(cashflow_totals[row_index]),
+            "cashflowMode": cashflow_rules[int(cashflow_indices[row_index])]["mode"],
+        }
+        rows.append(
+            (
+                weight_chunk[row_index // rules_per_weight],
+                int(rule_indices[row_index]),
+                int(cashflow_indices[row_index]),
+                metrics,
+            )
+        )
+    return completed_count, evaluation_count, rows
+
+
+def initialize_optimize_worker(dates, prices, rules, cashflow_rules, max_drawdown, engine="python"):
+    global OPTIMIZE_WORKER_STATE
+    OPTIMIZE_WORKER_STATE = {
+        "dates": dates,
+        "prices": prices,
+        "rules": rules,
+        "cashflowRules": cashflow_rules,
+        "maxDrawdown": max_drawdown,
+        "simulationContext": build_simulation_context(dates, prices),
+        "engine": engine,
+    }
+
+
+def evaluate_optimize_worker_chunk(chunk_index, weight_chunk):
+    if OPTIMIZE_WORKER_STATE is None:
+        raise RuntimeError("Optimize worker is not initialized")
+    state = OPTIMIZE_WORKER_STATE
+    evaluator = (
+        evaluate_optimize_numpy_chunk
+        if state.get("engine") == "numpy"
+        else evaluate_optimize_weight_chunk
+    )
+    completed_count, evaluated_count, rows = evaluator(
+        state["dates"],
+        state["prices"],
+        weight_chunk,
+        state["rules"],
+        state["cashflowRules"],
+        state["maxDrawdown"],
+        state["simulationContext"],
+    )
+    return chunk_index, completed_count, evaluated_count, rows
+
+
+def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=None):
     n = len(asset_ids)
     if n < 2:
         raise ValueError("至少选择两个标的才能优化。")
+    if progress:
+        progress(0.01, "preparing")
     options = clean_optimize_options(options, n)
     cache_key = (tuple(asset_ids), start or "", end or "", json.dumps(options, sort_keys=True, separators=(",", ":")))
     if cache_key in OPTIMIZE_CACHE:
+        if progress:
+            progress(1.0, "cached")
         return OPTIMIZE_CACHE[cache_key]
-    series_list = [get_series(asset_id) for asset_id in asset_ids]
+    series_list = []
+    for index, asset_id in enumerate(asset_ids):
+        if progress:
+            progress(0.03 + (index / max(1, n)) * 0.12, "market", asset_id)
+        series_list.append(get_series(asset_id))
+    if progress:
+        progress(0.16, "align")
     dates, prices = align_series(series_list, start, end)
+    simulation_context = build_simulation_context(dates, prices)
     step = options["step"]
     grids = generate_weight_grid(n, step=step, min_weight=options["minWeight"])
-    grids = [weights for weights in grids if all(weight <= options["maxWeight"] for weight in weights)]
+    grids = [
+        weights
+        for weights in grids
+        if all(weight <= options["maxWeight"] for weight in weights)
+        and sum(1 for weight in weights if weight > 0) >= 2
+    ]
     all_rules = [
         {"mode": "none", "threshold": 0.10, "label": "不再平衡", "family": "none"},
         {"mode": "monthly", "threshold": 0.10, "label": "每月", "family": "monthly"},
@@ -1840,27 +2459,130 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
         {"mode": "threshold", "threshold": 0.20, "label": "20% 阈值", "family": "threshold"},
     ]
     rules = [rule for rule in all_rules if rule["family"] in options["rebalanceModes"]]
+    cashflow_rules = [
+        {"mode": mode, "contributionRate": options["contributionRate"], "frequency": "monthly"}
+        for mode in options["cashflowStrategies"]
+    ]
+    total_evaluations = len(grids) * len(rules) * len(cashflow_rules)
+    requested_engine = os.environ.get(SCAN_ENGINE_ENV, "auto").strip().lower()
+    scan_engine = (
+        "numpy"
+        if np is not None
+        and requested_engine != "python"
+        and total_evaluations >= MIN_PARALLEL_SCAN_EVALUATIONS
+        else "python"
+    )
+    worker_count = optimize_worker_count(total_evaluations, len(grids))
+    if scan_engine == "numpy":
+        useful_numpy_workers = max(
+            1,
+            math.ceil(
+                total_evaluations * len(dates) / MIN_NUMPY_WORK_PER_PROCESS
+            ),
+        )
+        worker_count = min(worker_count, useful_numpy_workers)
+    if scan_engine == "numpy":
+        try:
+            max_batch_evaluations = max(1024, int(os.environ.get(SCAN_BATCH_SIZE_ENV, "32768")))
+        except (TypeError, ValueError):
+            max_batch_evaluations = 32768
+        weights_per_chunk = max(1, max_batch_evaluations // max(1, len(rules) * len(cashflow_rules)))
+        batch_chunk_count = math.ceil(len(grids) / weights_per_chunk) if grids else 1
+        target_chunk_count = max(worker_count, batch_chunk_count)
+    else:
+        target_chunk_count = worker_count * 8 if worker_count > 1 else min(200, len(grids))
+    weight_chunks = split_weight_chunks(grids, target_chunk_count)
+    completed_evaluations = 0
     candidates = []
     evaluated_count = 0
-    for weights in grids:
-        if sum(1 for weight in weights if weight > 0) < 2:
-            continue
-        for rule in rules:
-            try:
-                metrics, _, _, _, _ = simulate_portfolio(
-                    dates, prices, weights, rule, collect_details=False
-                )
-            except ValueError:
-                continue
-            evaluated_count += 1
-            if options["maxDrawdown"] is not None and metrics["maxDrawdown"] < -options["maxDrawdown"]:
-                continue
+    chunk_results = {}
+
+    def report_chunk(completed_count):
+        nonlocal completed_evaluations
+        completed_evaluations += completed_count
+        if progress:
+            progress(
+                0.18 + (completed_evaluations / max(1, total_evaluations)) * 0.72,
+                "scan",
+                f"{completed_evaluations}/{total_evaluations}",
+            )
+
+    def report_inflight(inflight_count):
+        if progress:
+            visible_count = min(total_evaluations, completed_evaluations + int(inflight_count))
+            progress(
+                0.18 + (visible_count / max(1, total_evaluations)) * 0.72,
+                "scan",
+                f"{visible_count}/{total_evaluations}",
+            )
+
+    scan_started = time.time()
+    if scan_engine == "numpy" and worker_count == 1:
+        for chunk_index, weight_chunk in enumerate(weight_chunks):
+            chunk_evaluation_count = len(weight_chunk) * len(rules) * len(cashflow_rules)
+            completed_count, chunk_evaluated_count, rows = evaluate_optimize_numpy_chunk(
+                dates,
+                prices,
+                weight_chunk,
+                rules,
+                cashflow_rules,
+                options["maxDrawdown"],
+                simulation_context,
+                progress=(
+                    lambda fraction, chunk_total=chunk_evaluation_count: report_inflight(
+                        fraction * chunk_total
+                    )
+                ),
+            )
+            chunk_results[chunk_index] = rows
+            evaluated_count += chunk_evaluated_count
+            report_chunk(completed_count)
+    elif worker_count == 1:
+        for chunk_index, weight_chunk in enumerate(weight_chunks):
+            completed_count, chunk_evaluated_count, rows = evaluate_optimize_weight_chunk(
+                dates,
+                prices,
+                weight_chunk,
+                rules,
+                cashflow_rules,
+                options["maxDrawdown"],
+                simulation_context,
+            )
+            chunk_results[chunk_index] = rows
+            evaluated_count += chunk_evaluated_count
+            report_chunk(completed_count)
+    else:
+        executor = ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=initialize_optimize_worker,
+            initargs=(dates, prices, rules, cashflow_rules, options["maxDrawdown"], scan_engine),
+        )
+        try:
+            futures = [
+                executor.submit(evaluate_optimize_worker_chunk, chunk_index, weight_chunk)
+                for chunk_index, weight_chunk in enumerate(weight_chunks)
+            ]
+            for future in as_completed(futures):
+                chunk_index, completed_count, chunk_evaluated_count, rows = future.result()
+                chunk_results[chunk_index] = rows
+                evaluated_count += chunk_evaluated_count
+                report_chunk(completed_count)
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    asset_refs = [{"id": asset_id} for asset_id in asset_ids]
+    for chunk_index in range(len(weight_chunks)):
+        for weights, rule_index, cashflow_index, metrics in chunk_results[chunk_index]:
+            rule = rules[rule_index]
+            cashflow = cashflow_rules[cashflow_index]
             rule_payload = {key: value for key, value in rule.items() if key != "family"}
             candidates.append(
                 {
                     "weights": weights,
-                    "assets": [{"id": asset_id} for asset_id in asset_ids],
+                    "assets": asset_refs,
                     "rebalance": rule_payload,
+                    "cashflow": cashflow,
                     "metrics": metrics,
                     "score": {
                         "sharpe0": metrics["sharpe0"] or -999,
@@ -1872,15 +2594,24 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
                     },
                 }
             )
+    log_event(
+        "optimize.scan_done",
+        evaluations=total_evaluations,
+        engine=scan_engine,
+        workers=worker_count,
+        elapsed_ms=int((time.time() - scan_started) * 1000),
+    )
 
     def metric_values(name):
         return [candidate["score"][name] for candidate in candidates]
 
-    def normalize(value, values, inverse=False):
-        if not values:
+    def metric_bounds(values):
+        return (min(values), max(values)) if values else None
+
+    def normalize(value, bounds, inverse=False):
+        if bounds is None:
             return 0
-        lo = min(values)
-        hi = max(values)
+        lo, hi = bounds
         if hi == lo:
             return 0.5
         score = (value - lo) / (hi - lo)
@@ -1893,28 +2624,43 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
                 "scanned": evaluated_count,
                 "eligible": 0,
                 "retained": 0,
+                "totalEvaluations": total_evaluations,
+                "engine": scan_engine,
+                "workers": worker_count,
                 "step": step,
                 "minWeight": options["minWeight"],
                 "maxWeight": options["maxWeight"],
                 "maxDrawdown": options["maxDrawdown"],
                 "limit": options["limit"],
+                "contributionRate": options["contributionRate"],
+                "cashflowStrategies": options["cashflowStrategies"],
             },
         }
         OPTIMIZE_CACHE[cache_key] = result
+        if progress:
+            progress(0.995, "finalize")
         return result
 
+    if progress:
+        progress(0.92, "score")
     cagr_values = metric_values("cagr")
     mdd_values = metric_values("mdd")
     vol_values = metric_values("vol")
     avg_nav_values = metric_values("averageNav")
+    cagr_bounds = metric_bounds(cagr_values)
+    mdd_bounds = metric_bounds(mdd_values)
+    vol_bounds = metric_bounds(vol_values)
+    avg_nav_bounds = metric_bounds(avg_nav_values)
     for candidate in candidates:
         score = candidate["score"]
         score["composite"] = (
-            normalize(score["cagr"], cagr_values) * 0.35
-            + normalize(score["mdd"], mdd_values) * 0.25
-            + normalize(score["averageNav"], avg_nav_values) * 0.25
-            + normalize(score["vol"], vol_values, inverse=True) * 0.15
+            normalize(score["cagr"], cagr_bounds) * 0.35
+            + normalize(score["mdd"], mdd_bounds) * 0.25
+            + normalize(score["averageNav"], avg_nav_bounds) * 0.25
+            + normalize(score["vol"], vol_bounds, inverse=True) * 0.15
         )
+    if progress:
+        progress(0.95, "rank")
 
     def percentile(values, ratio):
         ordered = sorted(values)
@@ -1944,6 +2690,8 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
             tags.append("低波动")
         if candidate["metrics"].get("rebalanceCount", 0) <= 2:
             tags.append("少再平衡")
+        if candidate.get("cashflow", {}).get("mode", "none") != "none":
+            tags.append(cashflow_label(candidate.get("cashflow")))
         max_weight = max(candidate["weights"]) if candidate["weights"] else 0
         if max_weight >= 0.75:
             tags.append("高集中度")
@@ -1970,73 +2718,99 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
         return sum(abs(a[i] - b[i]) for i in range(min(len(a), len(b))))
 
     selected = []
+    selected_keys = set()
+
+    def profile_key(row):
+        return (
+            tuple(round(w, 4) for w in row["weights"]),
+            row["rebalance"]["mode"],
+            round(row["rebalance"].get("threshold", 0), 4),
+            row.get("cashflow", {}).get("mode", "none"),
+            round(row.get("cashflow", {}).get("contributionRate", 0), 4),
+        )
 
     def add_profile(kind, title, rows):
         for row in rows:
-            key = (
-                tuple(round(w, 4) for w in row["weights"]),
-                row["rebalance"]["mode"],
-                round(row["rebalance"].get("threshold", 0), 4),
-            )
-            if any(item["key"] == key for item in selected):
+            key = profile_key(row)
+            if key in selected_keys:
                 continue
             selected.append({"key": key, "kind": kind, "title": title, **row})
+            selected_keys.add(key)
             return
+
+    def add_best_profile(kind, title, rows, sort_key, reverse=True):
+        best_row = None
+        best_value = None
+        for row in rows:
+            if profile_key(row) in selected_keys:
+                continue
+            value = sort_key(row)
+            if best_row is None or (value > best_value if reverse else value < best_value):
+                best_row = row
+                best_value = value
+        if best_row is not None:
+            add_profile(kind, title, [best_row])
 
     def add_many(kind, title, rows, limit):
         added = 0
         for row in rows:
-            key = (
-                tuple(round(w, 4) for w in row["weights"]),
-                row["rebalance"]["mode"],
-                round(row["rebalance"].get("threshold", 0), 4),
-            )
-            if any(item["key"] == key for item in selected):
+            key = profile_key(row)
+            if key in selected_keys:
                 continue
             selected.append({"key": key, "kind": kind, "title": title, **row})
+            selected_keys.add(key)
             added += 1
             if added >= limit:
                 return
 
-    add_profile(
+    add_best_profile(
         "sharpe",
         "风险调整后最佳",
-        sorted(candidates, key=lambda c: (c["score"]["sharpe0"], c["score"]["cagr"]), reverse=True),
+        candidates,
+        lambda c: (c["score"]["sharpe0"], c["score"]["cagr"]),
     )
-    add_profile(
+    add_best_profile(
         "calmar",
         "回撤效率最佳",
-        sorted(candidates, key=lambda c: (c["score"]["calmar"], c["score"]["cagr"]), reverse=True),
+        candidates,
+        lambda c: (c["score"]["calmar"], c["score"]["cagr"]),
     )
-    add_profile(
+    add_best_profile(
         "return",
         "年化收益最高",
-        sorted(candidates, key=lambda c: c["score"]["cagr"], reverse=True),
+        candidates,
+        lambda c: c["score"]["cagr"],
     )
-    add_profile(
+    add_best_profile(
         "averageNav",
         "平均净值最高",
-        sorted(candidates, key=lambda c: (c["score"]["averageNav"], c["score"]["cagr"]), reverse=True),
+        candidates,
+        lambda c: (c["score"]["averageNav"], c["score"]["cagr"]),
     )
     for limit in [0.20, 0.30, 0.40]:
-        filtered = [c for c in candidates if c["score"]["mdd"] >= -limit]
-        add_profile(
+        filtered = (c for c in candidates if c["score"]["mdd"] >= -limit)
+        add_best_profile(
             f"mdd{int(limit*100)}",
             f"最大回撤不超过 {int(limit*100)}% 的最高年化",
-            sorted(filtered, key=lambda c: c["score"]["cagr"], reverse=True),
+            filtered,
+            lambda c: c["score"]["cagr"],
         )
-    add_profile(
+    add_best_profile(
         "lowvol",
         "正收益下最低波动",
-        sorted(
-            [c for c in candidates if c["score"]["cagr"] > 0],
-            key=lambda c: (c["score"]["vol"], -c["score"]["cagr"]),
-        ),
+        (c for c in candidates if c["score"]["cagr"] > 0),
+        lambda c: (c["score"]["vol"], -c["score"]["cagr"]),
+        reverse=False,
+    )
+    balanced_rows = sorted(
+        candidates,
+        key=lambda c: (c["score"]["composite"], c["score"]["cagr"]),
+        reverse=True,
     )
     add_many(
         "balanced",
         "综合候选",
-        sorted(candidates, key=lambda c: (c["score"]["composite"], c["score"]["cagr"]), reverse=True),
+        balanced_rows,
         max(4, options["limit"] // 3),
     )
     add_many(
@@ -2052,10 +2826,12 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
     add_many(
         "balanced",
         "综合候选",
-        sorted(candidates, key=lambda c: (c["score"]["composite"], c["score"]["cagr"]), reverse=True),
+        balanced_rows,
         options["limit"],
     )
 
+    if progress:
+        progress(0.97, "rank")
     for index, item in enumerate(selected, start=1):
         item.pop("key", None)
         item["rank"] = index
@@ -2067,12 +2843,17 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
         "scanned": evaluated_count,
         "eligible": len(candidates),
         "retained": len(result_profiles),
+        "totalEvaluations": total_evaluations,
+        "engine": scan_engine,
+        "workers": worker_count,
         "step": step,
         "minWeight": options["minWeight"],
         "maxWeight": options["maxWeight"],
         "maxDrawdown": options["maxDrawdown"],
         "limit": options["limit"],
         "rebalanceModes": options["rebalanceModes"],
+        "contributionRate": options["contributionRate"],
+        "cashflowStrategies": options["cashflowStrategies"],
         "cagrRange": [min(cagr_values), max(cagr_values)],
         "drawdownRange": [min(mdd_values), max(mdd_values)],
         "averageNavRange": [min(avg_nav_values), max(avg_nav_values)],
@@ -2080,6 +2861,8 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None):
     }
     result = {"profiles": result_profiles, "summary": summary}
     OPTIMIZE_CACHE[cache_key] = result
+    if progress:
+        progress(0.995, "finalize")
     return result
 
 
@@ -2322,6 +3105,7 @@ def clean_share_result(raw_result, assets):
         "correlation": clean_share_correlation(raw_result.get("correlation"), asset_count),
         "assetSeries": clean_share_asset_series(raw_result.get("assetSeries"), asset_count, len(dates)),
         "assetStats": [],
+        "cashflow": clean_cashflow(raw_result.get("cashflow")),
     }
     return result
 
@@ -2363,6 +3147,7 @@ def clean_share_portfolio(raw_portfolio):
         or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "assets": assets,
         "rebalance": clean_share_rebalance(raw_portfolio.get("rebalance")),
+        "cashflow": clean_cashflow(raw_portfolio.get("cashflow")),
         "start": clean_share_date(raw_portfolio.get("start")),
         "end": clean_share_date(raw_portfolio.get("end")),
         "catalog": clean_share_catalog(raw_portfolio.get("catalog"), assets),
@@ -2370,6 +3155,7 @@ def clean_share_portfolio(raw_portfolio):
     result = clean_share_result(raw_portfolio.get("result"), assets)
     if result:
         portfolio["result"] = result
+        portfolio["cashflow"] = result.get("cashflow", portfolio["cashflow"])
         portfolio["metrics"] = result.get("metrics", {})
         portfolio["curve"] = sampled_share_curve_from_result(result)
         portfolio["catalog"] = clean_share_catalog(result.get("assets"), assets) or portfolio["catalog"]
@@ -2483,6 +3269,64 @@ def serve_index(handler):
     handler.wfile.write(data)
 
 
+class ClientDisconnected(RuntimeError):
+    pass
+
+
+def operation_error_payload(exc):
+    if isinstance(exc, MarketDataUnavailable):
+        return {
+            "error": str(exc),
+            "kind": "market_data_unavailable",
+            "asset": exc.asset_id,
+            "sourceStatus": exc.status,
+            "status": 502,
+        }
+    if isinstance(exc, ValueError):
+        return {"error": str(exc), "status": 400}
+    return {"error": str(exc), "status": 500}
+
+
+def stream_operation(handler, operation):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    handler.close_connection = True
+
+    def emit(payload):
+        try:
+            data = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+            handler.wfile.write(data)
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientDisconnected() from exc
+
+    def progress(value, stage, detail=""):
+        emit(
+            {
+                "type": "progress",
+                "progress": max(0.0, min(1.0, float(value))),
+                "stage": str(stage or ""),
+                "detail": str(detail or ""),
+            }
+        )
+
+    try:
+        result = operation(progress)
+        progress(1.0, "complete")
+        emit({"type": "result", "data": result})
+    except ClientDisconnected:
+        return
+    except Exception as exc:
+        try:
+            emit({"type": "error", **operation_error_payload(exc)})
+        except ClientDisconnected:
+            return
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
@@ -2557,6 +3401,34 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/") and not require_api_key(self):
                 return
+            if self.path == "/api/backtest/stream":
+                asset_ids, weights = parse_payload_assets(payload.get("assets", []))
+                stream_operation(
+                    self,
+                    lambda progress: backtest_portfolio(
+                        asset_ids,
+                        weights,
+                        payload.get("rebalance", {"mode": "annual", "threshold": 0.10}),
+                        payload.get("start") or None,
+                        payload.get("end") or None,
+                        payload.get("cashflow"),
+                        progress,
+                    ),
+                )
+                return
+            if self.path == "/api/optimize/stream":
+                asset_ids, _ = parse_payload_assets(payload.get("assets", []))
+                stream_operation(
+                    self,
+                    lambda progress: optimize_portfolio(
+                        asset_ids,
+                        payload.get("start") or None,
+                        payload.get("end") or None,
+                        payload.get("optimize") or {},
+                        progress,
+                    ),
+                )
+                return
             if self.path == "/api/backtest":
                 asset_ids, weights = parse_payload_assets(payload.get("assets", []))
                 result = backtest_portfolio(
@@ -2565,6 +3437,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     payload.get("rebalance", {"mode": "annual", "threshold": 0.10}),
                     payload.get("start") or None,
                     payload.get("end") or None,
+                    payload.get("cashflow"),
                 )
                 json_response(self, result)
                 return
@@ -2612,4 +3485,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
