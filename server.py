@@ -1689,7 +1689,7 @@ def clean_cashflow(raw_cashflow):
     mode = str(raw_cashflow.get("mode") or "none")
     if mode not in {"none", "target", "underweight", "drift"}:
         mode = "none"
-    contribution_rate = normalize_ratio_option(raw_cashflow.get("contributionRate"), 0.0, 0.0, 0.20)
+    contribution_rate = normalize_ratio_option(raw_cashflow.get("contributionRate"), 0.0, 0.0, 1.0)
     if contribution_rate <= 0:
         mode = "none"
         contribution_rate = 0.0
@@ -2067,7 +2067,7 @@ def clean_optimize_options(raw_options, asset_count):
         rebalance_modes = ["annual", "none", "quarterly", "threshold"]
     if not rebalance_modes:
         rebalance_modes = ["annual", "none", "quarterly", "threshold"]
-    contribution_rate = normalize_ratio_option(raw_options.get("contributionRate"), 0.0, 0.0, 0.20)
+    contribution_rate = normalize_ratio_option(raw_options.get("contributionRate"), 0.0, 0.0, 1.0)
     raw_cashflow_strategies = raw_options.get("cashflowStrategies")
     if isinstance(raw_cashflow_strategies, list):
         cashflow_strategies = [

@@ -10,6 +10,18 @@ class CashflowSimulationTests(unittest.TestCase):
             {"mode": "none", "contributionRate": 0.0, "frequency": "monthly"},
         )
 
+    def test_full_initial_capital_monthly_rate_is_not_clamped(self):
+        self.assertEqual(
+            server.clean_cashflow({"mode": "drift", "contributionRate": 1}),
+            {"mode": "drift", "contributionRate": 1.0, "frequency": "monthly"},
+        )
+        options = server.clean_optimize_options(
+            {"contributionRate": 1, "cashflowStrategies": ["drift"]},
+            2,
+        )
+        self.assertEqual(options["contributionRate"], 1.0)
+        self.assertEqual(options["cashflowStrategies"], ["drift"])
+
     def test_underweight_strategy_buys_the_underweight_asset_first(self):
         allocations, cash = server.allocate_contribution(
             "underweight",

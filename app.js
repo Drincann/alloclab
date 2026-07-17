@@ -277,7 +277,7 @@ const I18N = {
     candidateMapAxisHint: "越靠上年化收益越高，越靠左最大回撤越小；左上角通常更值得优先看。",
     candidateMapSizeHint: "点越大代表平均净值越高，说明回测期内整体净值水平更占优。",
     candidateMapColorHint: "深色点是重点候选，强调色点是已选组合，外圈表示当前聚焦的组合。",
-    candidateMapInteractionHint: "滚轮缩放，拖动平移，点击点会定位到下方候选列表。",
+    candidateMapInteractionHint: "滚轮缩放，拖动平移；点击点会定位候选行，点击候选行也会高亮对应点。",
     scanFilters: "筛选",
     allTags: "全部标签",
     selectedCandidates: "已选",
@@ -518,7 +518,7 @@ const I18N = {
     candidateMapAxisHint: "Higher means stronger CAGR; further left means lower max drawdown. The upper-left area is usually worth checking first.",
     candidateMapSizeHint: "Larger points have higher average NAV, meaning the portfolio stayed at a stronger level across the test window.",
     candidateMapColorHint: "Darker points are featured candidates, accent points are selected portfolios, and the ring marks the focused portfolio.",
-    candidateMapInteractionHint: "Use the mouse wheel to zoom, drag to pan, and click a point to locate it in the candidate table.",
+    candidateMapInteractionHint: "Use the mouse wheel to zoom or drag to pan. Click a point to locate its row, or click a row to highlight its point.",
     scanFilters: "Filters",
     allTags: "All tags",
     selectedCandidates: "Selected",
@@ -1087,7 +1087,7 @@ function normalizeCashflow(rawCashflow) {
   const mode = allowedModes.has(rawCashflow?.mode) ? rawCashflow.mode : "none";
   let contributionRate = Number(rawCashflow?.contributionRate || 0);
   if (contributionRate > 1) contributionRate /= 100;
-  contributionRate = Math.max(0, Math.min(0.2, Number.isFinite(contributionRate) ? contributionRate : 0));
+  contributionRate = Math.max(0, Math.min(1, Number.isFinite(contributionRate) ? contributionRate : 0));
   if (mode === "none" || contributionRate <= 0) {
     return { mode: "none", contributionRate: 0, frequency: "monthly" };
   }
@@ -2702,7 +2702,7 @@ function optimizerRequestOptions() {
     maxDrawdown: maxDrawdownText ? numericInputValue(els.optimizerMaxDrawdownInput, 0, 1, 95) / 100 : null,
     limit: numericInputValue(els.optimizerLimitInput, 24, 8, 60),
     rebalanceModes,
-    contributionRate: numericInputValue(els.optimizerContributionInput, 0, 0, 20) / 100,
+    contributionRate: numericInputValue(els.optimizerContributionInput, 0, 0, 100) / 100,
     cashflowStrategies,
   };
 }
@@ -4748,14 +4748,35 @@ function optimizerVisibleProfiles() {
   });
 }
 
-function focusOptimizerProfile(key) {
+function revealOptimizerRow(row) {
+  const tableWrap = row?.closest(".optimizer-table-wrap");
+  if (!tableWrap) return;
+  const wrapRect = tableWrap.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const margin = 8;
+  let delta = 0;
+  if (rowRect.top < wrapRect.top + margin) {
+    delta = rowRect.top - wrapRect.top - margin;
+  } else if (rowRect.bottom > wrapRect.bottom - margin) {
+    delta = rowRect.bottom - wrapRect.bottom + margin;
+  }
+  if (Math.abs(delta) < 1) return;
+  tableWrap.scrollTo({ top: tableWrap.scrollTop + delta, behavior: "smooth" });
+  scheduleOverlayScrollbarUpdate();
+}
+
+function focusOptimizerProfile(key, { reveal = false } = {}) {
   if (!key) return;
   state.optimizerFocusedKey = key;
-  renderOptimizer(state.optimizerProfiles);
-  requestAnimationFrame(() => {
-    const row = els.optimizerResults.querySelector(`[data-profile-key="${CSS.escape(key)}"]`);
-    row?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  let focusedRow = null;
+  els.optimizerResults.querySelectorAll("tr[data-profile-key]").forEach((row) => {
+    const focused = row.dataset.profileKey === key;
+    row.classList.toggle("focused", focused);
+    row.setAttribute("aria-current", focused ? "true" : "false");
+    if (focused) focusedRow = row;
   });
+  optimizerMapRedraw?.();
+  if (reveal && focusedRow) requestAnimationFrame(() => revealOptimizerRow(focusedRow));
 }
 
 function optimizerSortButton(key, label) {
@@ -5134,7 +5155,7 @@ function renderOptimizerMap(profiles) {
       }
       const point = canvasPoint(event);
       const nearest = nearestOptimizerPoint(point);
-      if (nearest) focusOptimizerProfile(nearest.key);
+      if (nearest) focusOptimizerProfile(nearest.key, { reveal: true });
       updateOptimizerMapCursor(event);
     });
   }
@@ -5241,7 +5262,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
       const focused = state.optimizerFocusedKey === key;
       const isFeatured = featuredKeys.has(key);
       return `
-        <tr class="${isFeatured ? "featured" : ""} ${selected ? "selected" : ""} ${focused ? "focused" : ""}" data-profile-key="${escapeHtml(key)}">
+        <tr class="${isFeatured ? "featured" : ""} ${selected ? "selected" : ""} ${focused ? "focused" : ""}" data-profile-key="${escapeHtml(key)}" tabindex="0" aria-current="${focused ? "true" : "false"}">
           <td class="optimizer-select-cell"><input type="checkbox" data-select-profile="${escapeHtml(key)}" ${selected ? "checked" : ""} aria-label="${escapeHtml(t("selectCandidate"))}" /></td>
           <td><strong>${escapeHtml(profileTitle(profile))}</strong>${optimizerTagsMarkup(profile)}<span>${escapeHtml(profile.rankReason || "")}</span></td>
           <td>${escapeHtml(weightsText)}</td>
@@ -5331,6 +5352,18 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
         state.optimizerSortDirection = key === "title" || key === "rebalance" ? "asc" : "desc";
       }
       renderOptimizer(state.optimizerProfiles);
+    });
+  });
+  els.optimizerResults.querySelectorAll("tr[data-profile-key]").forEach((row) => {
+    const activate = () => focusOptimizerProfile(row.dataset.profileKey || "");
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, select, a, label")) return;
+      activate();
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row || !["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      activate();
     });
   });
   els.optimizerResults.querySelectorAll("[data-select-profile]").forEach((input) => {
