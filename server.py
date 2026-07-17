@@ -1608,6 +1608,60 @@ def years_between(start, end):
     return (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days / 365.25
 
 
+def money_weighted_return(cashflows):
+    flows = []
+    for date, amount in cashflows:
+        if not date:
+            continue
+        try:
+            numeric_amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric_amount) and abs(numeric_amount) > 1e-15:
+            flows.append((datetime.fromisoformat(date), numeric_amount))
+    flows.sort(key=lambda item: item[0])
+    if not flows or not any(amount < 0 for _, amount in flows) or not any(amount > 0 for _, amount in flows):
+        return None
+    base_date = flows[0][0]
+    timed_flows = [((date - base_date).days / 365.25, amount) for date, amount in flows]
+
+    def npv(log_growth):
+        total = 0.0
+        for years, amount in timed_flows:
+            exponent = max(-700.0, min(700.0, -log_growth * years))
+            total += amount * math.exp(exponent)
+        return total
+
+    low = -20.0
+    high = 20.0
+    if npv(low) <= 0 or npv(high) >= 0:
+        return None
+    for _ in range(120):
+        middle = (low + high) / 2
+        if npv(middle) > 0:
+            low = middle
+        else:
+            high = middle
+    return math.expm1((low + high) / 2)
+
+
+def investor_metrics(start_date, end_date, terminal_value, contributions):
+    contribution_total = sum(float(amount) for _, amount in contributions)
+    invested_capital = 1.0 + contribution_total
+    terminal_value = float(terminal_value)
+    net_profit = terminal_value - invested_capital
+    cashflows = [(start_date, -1.0)]
+    cashflows.extend((date, -float(amount)) for date, amount in contributions)
+    cashflows.append((end_date, terminal_value))
+    return {
+        "investedCapital": invested_capital,
+        "terminalValue": terminal_value,
+        "netProfit": net_profit,
+        "netProfitRate": net_profit / invested_capital if invested_capital else None,
+        "moneyWeightedReturn": money_weighted_return(cashflows),
+    }
+
+
 def add_years(value, years):
     try:
         return value.replace(year=value.year + years)
@@ -1855,6 +1909,7 @@ def simulate_portfolio(
     rebalance_count = 0
     cashflow_count = 0
     cashflow_total = 0.0
+    contribution_events = []
     weights_timeline = []
     nav_index = 1.0
     previous_account_value = cash + sum(units[i] * prices[i][0] for i in range(asset_count))
@@ -1899,6 +1954,7 @@ def simulate_portfolio(
             cash += cash_allocation
             cashflow_count += 1
             cashflow_total += monthly_contribution
+            contribution_events.append((date, monthly_contribution))
             value = cash + sum(units[i] * prices_at_t[i] for i in range(asset_count))
         if mode == "threshold":
             rebalance_due = t < len(dates) - 1 and any(
@@ -1934,6 +1990,8 @@ def simulate_portfolio(
     metrics["cashflowCount"] = cashflow_count
     metrics["cashflowTotal"] = cashflow_total
     metrics["cashflowMode"] = cashflow["mode"]
+    if metrics_mode != "scan":
+        metrics.update(investor_metrics(dates[0], dates[-1], previous_account_value, contribution_events))
     return metrics, drawdowns, nav, rebalances, weights_timeline
 
 def backtest_portfolio(asset_ids, weights, rebalance, start=None, end=None, cashflow=None, progress=None):

@@ -73,6 +73,51 @@ class CashflowSimulationTests(unittest.TestCase):
         self.assertEqual(metrics["cashflowCount"], 2)
         self.assertAlmostEqual(metrics["cashflowTotal"], 0.02)
         self.assertAlmostEqual(metrics["totalReturn"], 0.0)
+        self.assertAlmostEqual(metrics["investedCapital"], 1.02)
+        self.assertAlmostEqual(metrics["terminalValue"], 1.02)
+        self.assertAlmostEqual(metrics["netProfit"], 0.0)
+        self.assertAlmostEqual(metrics["moneyWeightedReturn"], 0.0)
+
+    def test_drift_cashflow_preserves_strategy_return_but_changes_investor_outcome(self):
+        dates = ["2020-01-02", "2020-01-31", "2020-02-28", "2020-03-31"]
+        prices = [[100.0, 200.0, 100.0, 200.0]]
+        rebalance = {"mode": "none", "threshold": 0.1}
+
+        lump_sum_metrics, _, _, _, _ = server.simulate_portfolio(
+            dates,
+            prices,
+            [1.0],
+            rebalance,
+        )
+        cashflow_metrics, _, _, _, _ = server.simulate_portfolio(
+            dates,
+            prices,
+            [1.0],
+            rebalance,
+            cashflow={"mode": "drift", "contributionRate": 1.0},
+        )
+
+        self.assertAlmostEqual(cashflow_metrics["cagr"], lump_sum_metrics["cagr"])
+        self.assertAlmostEqual(cashflow_metrics["investedCapital"], 3.0)
+        self.assertAlmostEqual(cashflow_metrics["terminalValue"], 5.0)
+        self.assertAlmostEqual(cashflow_metrics["netProfit"], 2.0)
+        self.assertNotAlmostEqual(
+            cashflow_metrics["moneyWeightedReturn"],
+            lump_sum_metrics["moneyWeightedReturn"],
+        )
+
+    def test_late_contribution_is_visible_in_total_invested_return(self):
+        metrics = server.investor_metrics(
+            "2020-01-01",
+            "2020-12-31",
+            1_000_000.2,
+            [("2020-12-31", 999_999.0)],
+        )
+
+        self.assertAlmostEqual(metrics["investedCapital"], 1_000_000.0)
+        self.assertAlmostEqual(metrics["netProfit"], 0.2)
+        self.assertAlmostEqual(metrics["netProfitRate"], 0.0000002)
+        self.assertGreater(metrics["moneyWeightedReturn"], 0.19)
 
     def test_underweight_cashflow_can_avoid_a_threshold_rebalance(self):
         dates = ["2020-01-02", "2020-01-31", "2020-02-03"]
