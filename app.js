@@ -391,13 +391,17 @@ const I18N = {
     annualShort: "年化",
     strategyCagrShort: "策略年化",
     strategyTotalReturnShort: "策略总收益",
-    moneyWeightedCagrShort: "资金加权年化",
+    capitalEquivalentCagrShort: "总本金等效年化",
+    lumpSumDifferenceShort: "相对一次性投入",
+    moneyWeightedCagrShort: "资金加权年化 (XIRR)",
     investedCapitalShort: "累计投入",
     terminalValueShort: "期末资产",
     netProfitShort: "净盈利",
     netProfitRateShort: "总投入收益",
     strategyCagrHelp: "剔除新增本金影响后的时间加权年化收益，用于比较组合策略本身。定投只改变投入时点但不改变持仓路径时，它可以与一次性投入相同。",
     strategyTotalReturnHelp: "剔除新增本金影响后的时间加权总收益，用于比较组合策略本身，不代表账户实际赚到的金额。",
+    capitalEquivalentCagrHelp: "公式：(期末资产 / 累计投入)^(1 / 回测年数) - 1。假设全部定投本金第一天已经存在，尚未投入的部分按 0 收益持有；适合衡量分批投入整个资金池的最终效率。",
+    lumpSumDifferenceHelp: "将相同累计本金在第一天全部投入同一组合，并关闭现金流后单独回测；这里显示定投期末资产相对该一次性投入基准的差额。-20% 表示定投最终少 20%，正数表示定投更高。",
     moneyWeightedCagrHelp: "根据初始投入、每次定投的实际日期和期末资产计算 XIRR。它衡量资金实际在场期间的年化回报；刚在期末投入且尚未经历涨跌的本金不会稀释此前资金的 XIRR，因此需同时看总投入收益。",
     investedCapitalHelp: "初始本金加上回测期间全部定投金额。数值以初始本金为 1，例如 25x 表示累计投入了 25 倍初始本金。",
     terminalValueHelp: "回测结束时账户中的实际资产，以初始本金为 1。它包含初始本金、后续定投以及投资盈亏。",
@@ -646,13 +650,17 @@ const I18N = {
     annualShort: "CAGR",
     strategyCagrShort: "Strategy CAGR",
     strategyTotalReturnShort: "Strategy return",
-    moneyWeightedCagrShort: "Money-weighted return",
+    capitalEquivalentCagrShort: "Total-capital CAGR",
+    lumpSumDifferenceShort: "Vs lump sum",
+    moneyWeightedCagrShort: "Money-weighted (XIRR)",
     investedCapitalShort: "Capital invested",
     terminalValueShort: "Ending assets",
     netProfitShort: "Net profit",
     netProfitRateShort: "Return on contributions",
     strategyCagrHelp: "Time-weighted annual return with external contributions removed. It compares the strategy itself and can match a lump-sum result when contributions do not change the holding path.",
     strategyTotalReturnHelp: "Time-weighted total return with external contributions removed. It compares the strategy itself, not the amount earned in the account.",
+    capitalEquivalentCagrHelp: "Formula: (ending assets / invested capital)^(1 / backtest years) - 1. It assumes all contributed capital existed on day one and the not-yet-invested portion earned 0%, measuring the whole capital pool's result.",
+    lumpSumDifferenceHelp: "A separate benchmark invests the same total contributed capital on day one in the same portfolio with cashflows disabled. This is the ending-asset difference versus that benchmark; -20% means the staged investment ended 20% lower.",
     moneyWeightedCagrHelp: "XIRR calculated from the initial investment, each contribution date, and ending assets. Capital added at the very end has no time to earn a return and therefore does not dilute the earlier capital's XIRR; use return on contributions alongside it.",
     investedCapitalHelp: "Initial capital plus every contribution during the backtest, expressed as a multiple of initial capital.",
     terminalValueHelp: "Actual account assets at the end of the backtest, including initial capital, contributions, and investment profit or loss.",
@@ -1114,6 +1122,15 @@ function investorMetricsForDisplay(metrics = {}) {
     : hasCashflow
       ? NaN
       : optionalNumber(metrics.cagr);
+  const suppliedCapitalEquivalentCagr = optionalNumber(metrics.capitalEquivalentCagr);
+  const years = optionalNumber(metrics.years);
+  const capitalEquivalentCagr = Number.isFinite(suppliedCapitalEquivalentCagr)
+    ? suppliedCapitalEquivalentCagr
+    : Number.isFinite(terminalValue) && terminalValue > 0 && investedCapital > 0 && years > 0
+      ? (terminalValue / investedCapital) ** (1 / years) - 1
+      : NaN;
+  const lumpSumTerminalValue = optionalNumber(metrics.lumpSumTerminalValue);
+  const lumpSumDifference = optionalNumber(metrics.lumpSumDifference);
   return {
     hasCashflow,
     investedCapital,
@@ -1121,6 +1138,9 @@ function investorMetricsForDisplay(metrics = {}) {
     netProfit,
     netProfitRate,
     moneyWeightedReturn,
+    capitalEquivalentCagr,
+    lumpSumTerminalValue,
+    lumpSumDifference,
   };
 }
 
@@ -1372,6 +1392,8 @@ function comparisonSortValue(entry, sortKey) {
     return withdrawal.depleted ? -Infinity : Number(withdrawal.cagr ?? -Infinity);
   }
   if (sortKey === "moneyWeighted") return Number(investor.moneyWeightedReturn ?? -Infinity);
+  if (sortKey === "capitalEquivalent") return Number(investor.capitalEquivalentCagr ?? -Infinity);
+  if (sortKey === "lumpSumDifference") return Number(investor.lumpSumDifference ?? -Infinity);
   if (sortKey === "investedCapital") return Number(investor.investedCapital ?? -Infinity);
   if (sortKey === "terminalValue") return Number(investor.terminalValue ?? -Infinity);
   if (sortKey === "netProfit") return Number(investor.netProfit ?? -Infinity);
@@ -1420,7 +1442,7 @@ function setComparisonSort(sortKey) {
 function setComparisonViewMode(mode) {
   if (!["branch", "overlap"].includes(mode) || comparisonViewMode() === mode) return;
   state.comparison.viewMode = mode;
-  if (mode === "overlap" && ["moneyWeighted", "investedCapital", "terminalValue", "netProfit", "netProfitRate"].includes(state.comparison.sortKey)) {
+  if (mode === "overlap" && ["moneyWeighted", "capitalEquivalent", "lumpSumDifference", "investedCapital", "terminalValue", "netProfit", "netProfitRate"].includes(state.comparison.sortKey)) {
     state.comparison.sortKey = "cagr";
     state.comparison.sortDirection = "desc";
   }
@@ -3249,6 +3271,8 @@ function renderMetrics() {
   ];
   if (investor.hasCashflow) {
     cards.unshift(
+      [t("capitalEquivalentCagrShort"), fmtOptionalPct(investor.capitalEquivalentCagr), metricSignClass(investor.capitalEquivalentCagr), t("capitalEquivalentCagrHelp")],
+      [t("lumpSumDifferenceShort"), fmtOptionalPct(investor.lumpSumDifference), metricSignClass(investor.lumpSumDifference), t("lumpSumDifferenceHelp")],
       [t("moneyWeightedCagrShort"), fmtOptionalPct(investor.moneyWeightedReturn), metricSignClass(investor.moneyWeightedReturn), t("moneyWeightedCagrHelp")],
       [t("investedCapitalShort"), fmtOptionalMultiple(investor.investedCapital), "", t("investedCapitalHelp")],
       [t("terminalValueShort"), fmtOptionalMultiple(investor.terminalValue), "", t("terminalValueHelp")],
@@ -3971,7 +3995,9 @@ function renderComparisonPanel(message = "") {
            <button type="button" data-action="edit" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("edit"))}</button>
            <button type="button" data-action="remove" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("remove"))}</button>`;
       const metricCells = showInvestorColumns
-        ? `<td>${escapeHtml(fmtOptionalPct(investor.moneyWeightedReturn))}</td>
+        ? `<td>${escapeHtml(fmtOptionalPct(investor.capitalEquivalentCagr))}</td>
+          <td>${escapeHtml(fmtOptionalPct(investor.lumpSumDifference))}</td>
+          <td>${escapeHtml(fmtOptionalPct(investor.moneyWeightedReturn))}</td>
           <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
           <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
           <td>${escapeHtml(fmtOptionalMultiple(investor.investedCapital))}</td>
@@ -4014,7 +4040,9 @@ function renderComparisonPanel(message = "") {
             <th><button type="button" data-sort="portfolio">${escapeHtml(t("portfolio"))}${escapeHtml(comparisonSortIndicator("portfolio"))}</button></th>
             <th><button type="button" data-sort="rebalance">${escapeHtml(t("rebalance"))}${escapeHtml(comparisonSortIndicator("rebalance"))}</button></th>
             ${showInvestorColumns
-              ? `<th><button type="button" data-sort="moneyWeighted">${escapeHtml(t("moneyWeightedCagrShort"))}${escapeHtml(comparisonSortIndicator("moneyWeighted"))}</button></th>
+              ? `<th><button type="button" data-sort="capitalEquivalent">${escapeHtml(t("capitalEquivalentCagrShort"))}${escapeHtml(comparisonSortIndicator("capitalEquivalent"))}</button></th>
+                <th><button type="button" data-sort="lumpSumDifference">${escapeHtml(t("lumpSumDifferenceShort"))}${escapeHtml(comparisonSortIndicator("lumpSumDifference"))}</button></th>
+                <th><button type="button" data-sort="moneyWeighted">${escapeHtml(t("moneyWeightedCagrShort"))}${escapeHtml(comparisonSortIndicator("moneyWeighted"))}</button></th>
                 <th><button type="button" data-sort="cagr">${escapeHtml(t("strategyCagrShort"))}${escapeHtml(comparisonSortIndicator("cagr"))}</button></th>
                 <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>
                 <th><button type="button" data-sort="investedCapital">${escapeHtml(t("investedCapitalShort"))}${escapeHtml(comparisonSortIndicator("investedCapital"))}</button></th>

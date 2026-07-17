@@ -1,4 +1,6 @@
 import unittest
+from datetime import date, timedelta
+from unittest.mock import patch
 
 import server
 
@@ -77,6 +79,7 @@ class CashflowSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["terminalValue"], 1.02)
         self.assertAlmostEqual(metrics["netProfit"], 0.0)
         self.assertAlmostEqual(metrics["moneyWeightedReturn"], 0.0)
+        self.assertAlmostEqual(metrics["capitalEquivalentCagr"], 0.0)
 
     def test_drift_cashflow_preserves_strategy_return_but_changes_investor_outcome(self):
         dates = ["2020-01-02", "2020-01-31", "2020-02-28", "2020-03-31"]
@@ -118,6 +121,37 @@ class CashflowSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["netProfit"], 0.2)
         self.assertAlmostEqual(metrics["netProfitRate"], 0.0000002)
         self.assertGreater(metrics["moneyWeightedReturn"], 0.19)
+        self.assertLess(metrics["capitalEquivalentCagr"], 0.000001)
+
+    def test_backtest_compares_cashflow_with_true_lump_sum_run(self):
+        start = date(2020, 1, 2)
+        rows = [
+            {
+                "date": (start + timedelta(days=index)).isoformat(),
+                "close": 100 * (1.001 ** index),
+            }
+            for index in range(90)
+        ]
+        metadata = {"id": "A", "symbol": "A", "name": "Asset A"}
+        with (
+            patch.object(server, "get_series", return_value=rows),
+            patch.object(server, "get_asset_meta", return_value=metadata),
+        ):
+            result = server.backtest_portfolio(
+                ["A"],
+                [100],
+                {"mode": "none", "threshold": 0.1},
+                cashflow={"mode": "drift", "contributionRate": 1.0},
+            )
+
+        metrics = result["metrics"]
+        self.assertAlmostEqual(metrics["investedCapital"], 3.0)
+        expected_lump_sum_terminal = metrics["investedCapital"] * rows[-1]["close"] / rows[0]["close"]
+        self.assertAlmostEqual(metrics["lumpSumTerminalValue"], expected_lump_sum_terminal)
+        self.assertAlmostEqual(
+            metrics["lumpSumDifference"],
+            metrics["terminalValue"] / expected_lump_sum_terminal - 1,
+        )
 
     def test_underweight_cashflow_can_avoid_a_threshold_rebalance(self):
         dates = ["2020-01-02", "2020-01-31", "2020-02-03"]

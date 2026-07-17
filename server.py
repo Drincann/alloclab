@@ -1653,12 +1653,35 @@ def investor_metrics(start_date, end_date, terminal_value, contributions):
     cashflows = [(start_date, -1.0)]
     cashflows.extend((date, -float(amount)) for date, amount in contributions)
     cashflows.append((end_date, terminal_value))
+    years = years_between(start_date, end_date)
+    capital_equivalent_cagr = (
+        (terminal_value / invested_capital) ** (1 / years) - 1
+        if terminal_value > 0 and invested_capital > 0 and years > 0
+        else None
+    )
     return {
         "investedCapital": invested_capital,
         "terminalValue": terminal_value,
         "netProfit": net_profit,
         "netProfitRate": net_profit / invested_capital if invested_capital else None,
         "moneyWeightedReturn": money_weighted_return(cashflows),
+        "capitalEquivalentCagr": capital_equivalent_cagr,
+    }
+
+
+def lump_sum_benchmark_metrics(investor, benchmark):
+    invested_capital = float(investor.get("investedCapital") or 0)
+    terminal_value = float(investor.get("terminalValue") or 0)
+    benchmark_multiple = 1 + float(benchmark.get("totalReturn") or 0)
+    lump_sum_terminal = invested_capital * benchmark_multiple
+    return {
+        "lumpSumCagr": benchmark.get("cagr"),
+        "lumpSumTerminalValue": lump_sum_terminal,
+        "lumpSumDifference": (
+            terminal_value / lump_sum_terminal - 1
+            if terminal_value > 0 and lump_sum_terminal > 0
+            else None
+        ),
     }
 
 
@@ -2018,6 +2041,18 @@ def backtest_portfolio(asset_ids, weights, rebalance, start=None, end=None, cash
         simulation_context=simulation_context,
         progress=(lambda value: progress(0.52 + value * 0.24, "simulate")) if progress else None,
     )
+    if metrics.get("cashflowCount", 0) > 0:
+        lump_sum_metrics, _, _, _, _ = simulate_portfolio(
+            dates,
+            prices,
+            target_weights,
+            rebalance,
+            collect_details=False,
+            cashflow={"mode": "none", "contributionRate": 0},
+            simulation_context=simulation_context,
+            metrics_mode="scan",
+        )
+        metrics.update(lump_sum_benchmark_metrics(metrics, lump_sum_metrics))
     if progress:
         progress(0.78, "metrics")
     corr = correlation_matrix(prices)
