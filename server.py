@@ -2013,6 +2013,13 @@ def simulate_portfolio(
     metrics["cashflowCount"] = cashflow_count
     metrics["cashflowTotal"] = cashflow_total
     metrics["cashflowMode"] = cashflow["mode"]
+    invested_capital = 1.0 + cashflow_total
+    years = metrics.get("years") or 0
+    metrics["capitalEquivalentCagr"] = (
+        (previous_account_value / invested_capital) ** (1 / years) - 1
+        if previous_account_value > 0 and invested_capital > 0 and years > 0
+        else None
+    )
     if metrics_mode != "scan":
         metrics.update(investor_metrics(dates[0], dates[-1], previous_account_value, contribution_events))
     return metrics, drawdowns, nav, rebalances, weights_timeline
@@ -2439,6 +2446,12 @@ def evaluate_optimize_numpy_chunk(
     years = years_between(dates[0], dates[-1])
     total_returns = nav - 1.0
     cagrs = np.power(nav, 1.0 / years) - 1.0 if years > 0 else np.zeros_like(nav)
+    invested_capitals = 1.0 + cashflow_totals
+    capital_equivalent_cagrs = (
+        np.power(values / invested_capitals, 1.0 / years) - 1.0
+        if years > 0
+        else np.zeros_like(values)
+    )
     if return_count >= 2:
         volatilities = np.sqrt((return_m2 / (return_count - 1)) * 252.0)
     else:
@@ -2466,6 +2479,7 @@ def evaluate_optimize_numpy_chunk(
             "cashflowCount": int(cashflow_counts[row_index]),
             "cashflowTotal": float(cashflow_totals[row_index]),
             "cashflowMode": cashflow_rules[int(cashflow_indices[row_index])]["mode"],
+            "capitalEquivalentCagr": float(capital_equivalent_cagrs[row_index]),
         }
         rows.append(
             (
@@ -2680,7 +2694,7 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
                     "score": {
                         "sharpe0": metrics["sharpe0"] or -999,
                         "calmar": metrics["calmar"] or -999,
-                        "cagr": metrics["cagr"],
+                        "annualized": metrics["capitalEquivalentCagr"],
                         "mdd": metrics["maxDrawdown"],
                         "vol": metrics["volatility"],
                         "averageNav": metrics["averageNav"],
@@ -2736,18 +2750,18 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
 
     if progress:
         progress(0.92, "score")
-    cagr_values = metric_values("cagr")
+    annualized_values = metric_values("annualized")
     mdd_values = metric_values("mdd")
     vol_values = metric_values("vol")
     avg_nav_values = metric_values("averageNav")
-    cagr_bounds = metric_bounds(cagr_values)
+    annualized_bounds = metric_bounds(annualized_values)
     mdd_bounds = metric_bounds(mdd_values)
     vol_bounds = metric_bounds(vol_values)
     avg_nav_bounds = metric_bounds(avg_nav_values)
     for candidate in candidates:
         score = candidate["score"]
         score["composite"] = (
-            normalize(score["cagr"], cagr_bounds) * 0.35
+            normalize(score["annualized"], annualized_bounds) * 0.35
             + normalize(score["mdd"], mdd_bounds) * 0.25
             + normalize(score["averageNav"], avg_nav_bounds) * 0.25
             + normalize(score["vol"], vol_bounds, inverse=True) * 0.15
@@ -2762,8 +2776,8 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
         idx = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * ratio)))
         return ordered[idx]
 
-    cagr_p75 = percentile(cagr_values, 0.75)
-    cagr_p90 = percentile(cagr_values, 0.90)
+    annualized_p75 = percentile(annualized_values, 0.75)
+    annualized_p90 = percentile(annualized_values, 0.90)
     mdd_p75 = percentile(mdd_values, 0.75)
     avg_nav_p75 = percentile(avg_nav_values, 0.75)
     vol_p25 = percentile(vol_values, 0.25)
@@ -2771,9 +2785,9 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
     def profile_tags(candidate):
         score = candidate["score"]
         tags = []
-        if score["cagr"] >= cagr_p90:
-            tags.append("高年化")
-        elif score["cagr"] >= cagr_p75:
+        if score["annualized"] >= annualized_p90:
+            tags.append("高等效年化")
+        elif score["annualized"] >= annualized_p75:
             tags.append("收益靠前")
         if score["mdd"] >= mdd_p75:
             tags.append("低回撤")
@@ -2795,8 +2809,8 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
     def profile_reason(candidate):
         tags = profile_tags(candidate)
         score = candidate["score"]
-        if "高年化" in tags:
-            return f"年化 {score['cagr'] * 100:.1f}% 位于候选前列，适合作为收益上限参考。"
+        if "高等效年化" in tags:
+            return f"等效年化 {score['annualized'] * 100:.1f}% 位于候选前列，适合作为收益上限参考。"
         if "低回撤" in tags and "高平均净值" in tags:
             return "回撤和平均净值同时靠前，适合作为均衡候选优先比较。"
         if "低回撤" in tags:
@@ -2860,44 +2874,44 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
         "sharpe",
         "风险调整后最佳",
         candidates,
-        lambda c: (c["score"]["sharpe0"], c["score"]["cagr"]),
+        lambda c: (c["score"]["sharpe0"], c["score"]["annualized"]),
     )
     add_best_profile(
         "calmar",
         "回撤效率最佳",
         candidates,
-        lambda c: (c["score"]["calmar"], c["score"]["cagr"]),
+        lambda c: (c["score"]["calmar"], c["score"]["annualized"]),
     )
     add_best_profile(
         "return",
-        "年化收益最高",
+        "等效年化最高",
         candidates,
-        lambda c: c["score"]["cagr"],
+        lambda c: c["score"]["annualized"],
     )
     add_best_profile(
         "averageNav",
         "平均净值最高",
         candidates,
-        lambda c: (c["score"]["averageNav"], c["score"]["cagr"]),
+        lambda c: (c["score"]["averageNav"], c["score"]["annualized"]),
     )
     for limit in [0.20, 0.30, 0.40]:
         filtered = (c for c in candidates if c["score"]["mdd"] >= -limit)
         add_best_profile(
             f"mdd{int(limit*100)}",
-            f"最大回撤不超过 {int(limit*100)}% 的最高年化",
+            f"最大回撤不超过 {int(limit*100)}% 的最高等效年化",
             filtered,
-            lambda c: c["score"]["cagr"],
+            lambda c: c["score"]["annualized"],
         )
     add_best_profile(
         "lowvol",
         "正收益下最低波动",
-        (c for c in candidates if c["score"]["cagr"] > 0),
-        lambda c: (c["score"]["vol"], -c["score"]["cagr"]),
+        (c for c in candidates if c["score"]["annualized"] > 0),
+        lambda c: (c["score"]["vol"], -c["score"]["annualized"]),
         reverse=False,
     )
     balanced_rows = sorted(
         candidates,
-        key=lambda c: (c["score"]["composite"], c["score"]["cagr"]),
+        key=lambda c: (c["score"]["composite"], c["score"]["annualized"]),
         reverse=True,
     )
     add_many(
@@ -2947,7 +2961,7 @@ def optimize_portfolio(asset_ids, start=None, end=None, options=None, progress=N
         "rebalanceModes": options["rebalanceModes"],
         "contributionRate": options["contributionRate"],
         "cashflowStrategies": options["cashflowStrategies"],
-        "cagrRange": [min(cagr_values), max(cagr_values)],
+        "equivalentCagrRange": [min(annualized_values), max(annualized_values)],
         "drawdownRange": [min(mdd_values), max(mdd_values)],
         "averageNavRange": [min(avg_nav_values), max(avg_nav_values)],
         "volatilityRange": [min(vol_values), max(vol_values)],

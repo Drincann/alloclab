@@ -274,7 +274,7 @@ const I18N = {
     gridStep: "步长",
     candidateMap: "候选分布",
     candidateMapIntro: "每个点是一个扫描出的组合，位置用于快速判断收益和回撤的取舍。",
-    candidateMapAxisHint: "越靠上年化收益越高，越靠左最大回撤越小；左上角通常更值得优先看。",
+    candidateMapAxisHint: "越靠上总本金等效年化越高，越靠左最大回撤越小；左上角通常更值得优先看。",
     candidateMapSizeHint: "点越大代表平均净值越高，说明回测期内整体净值水平更占优。",
     candidateMapColorHint: "深色点是重点候选，强调色点是已选组合，外圈表示当前聚焦的组合。",
     candidateMapInteractionHint: "滚轮缩放，拖动平移；点击点会定位候选行，点击候选行也会高亮对应点。",
@@ -389,6 +389,7 @@ const I18N = {
     yearsHelp: "回测起止日期之间的自然年长度，用于把总收益折算成年化收益和波动。",
     rebalanceCountHelp: "按当前规则实际调仓的次数。阈值再平衡下，次数越多通常代表权重漂移越频繁，也可能带来更多交易成本。",
     annualShort: "年化",
+    equivalentAnnualShort: "等效年化",
     strategyCagrShort: "策略年化",
     strategyTotalReturnShort: "策略总收益",
     capitalEquivalentCagrShort: "总本金等效年化",
@@ -433,13 +434,13 @@ const I18N = {
     assetClassYahoo: "美股标的",
     profileSharpe: "风险调整后最佳",
     profileCalmar: "回撤效率最佳",
-    profileReturn: "年化收益最高",
+    profileReturn: "等效年化最高",
     profileAverageNav: "平均净值最高",
     profileBalanced: "综合候选",
     profileDiverse: "差异候选",
-    profileMdd20: "最大回撤不超过 20% 的最高年化",
-    profileMdd30: "最大回撤不超过 30% 的最高年化",
-    profileMdd40: "最大回撤不超过 40% 的最高年化",
+    profileMdd20: "最大回撤不超过 20% 的最高等效年化",
+    profileMdd30: "最大回撤不超过 30% 的最高等效年化",
+    profileMdd40: "最大回撤不超过 40% 的最高等效年化",
     profileLowVol: "正收益下最低波动",
   },
   en: {
@@ -537,7 +538,7 @@ const I18N = {
     gridStep: "Step",
     candidateMap: "Candidate map",
     candidateMapIntro: "Each point is one scanned portfolio. Its position shows the return and drawdown tradeoff.",
-    candidateMapAxisHint: "Higher means stronger CAGR; further left means lower max drawdown. The upper-left area is usually worth checking first.",
+    candidateMapAxisHint: "Higher means stronger total-capital CAGR; further left means lower max drawdown. The upper-left area is usually worth checking first.",
     candidateMapSizeHint: "Larger points have higher average NAV, meaning the portfolio stayed at a stronger level across the test window.",
     candidateMapColorHint: "Darker points are featured candidates, accent points are selected portfolios, and the ring marks the focused portfolio.",
     candidateMapInteractionHint: "Use the mouse wheel to zoom or drag to pan. Click a point to locate its row, or click a row to highlight its point.",
@@ -652,6 +653,7 @@ const I18N = {
     yearsHelp: "Calendar-year length between the start and end dates, used to annualize return and volatility.",
     rebalanceCountHelp: "Actual number of rebalances triggered. Under threshold rules, more events usually mean more weight drift and potentially more trading cost.",
     annualShort: "CAGR",
+    equivalentAnnualShort: "Equivalent CAGR",
     strategyCagrShort: "Strategy CAGR",
     strategyTotalReturnShort: "Strategy return",
     capitalEquivalentCagrShort: "Total-capital CAGR",
@@ -696,13 +698,13 @@ const I18N = {
     assetClassYahoo: "US ticker",
     profileSharpe: "Best risk-adjusted",
     profileCalmar: "Best drawdown efficiency",
-    profileReturn: "Highest CAGR",
+    profileReturn: "Highest equivalent CAGR",
     profileAverageNav: "Highest avg NAV",
     profileBalanced: "Balanced candidate",
     profileDiverse: "Diverse candidate",
-    profileMdd20: "Highest CAGR with max drawdown <= 20%",
-    profileMdd30: "Highest CAGR with max drawdown <= 30%",
-    profileMdd40: "Highest CAGR with max drawdown <= 40%",
+    profileMdd20: "Highest equivalent CAGR with max drawdown <= 20%",
+    profileMdd30: "Highest equivalent CAGR with max drawdown <= 30%",
+    profileMdd40: "Highest equivalent CAGR with max drawdown <= 40%",
     profileLowVol: "Lowest volatility with positive CAGR",
   },
 };
@@ -4832,6 +4834,7 @@ async function optimize() {
 
 function optimizerSummaryMarkup(summary) {
   if (!summary) return "";
+  const equivalentCagrRange = summary.equivalentCagrRange || summary.cagrRange;
   const cards = [
     [t("scannedCandidates"), String(summary.scanned ?? 0)],
     [t("eligibleCandidates"), String(summary.eligible ?? summary.scanned ?? 0)],
@@ -4839,7 +4842,7 @@ function optimizerSummaryMarkup(summary) {
     [t("gridStep"), fmtPct(summary.step ?? 0, 1)],
     [t("maxWeight"), fmtPct(summary.maxWeight ?? 0, 0)],
     [t("maxDrawdownLimit"), summary.maxDrawdown == null ? t("unlimited") : fmtPct(summary.maxDrawdown, 0)],
-    [t("annualShort"), `${fmtPct(summary.cagrRange?.[0])} - ${fmtPct(summary.cagrRange?.[1])}`],
+    [t("equivalentAnnualShort"), `${fmtPct(equivalentCagrRange?.[0])} - ${fmtPct(equivalentCagrRange?.[1])}`],
     [t("drawdownShort"), `${fmtPct(summary.drawdownRange?.[0])} - ${fmtPct(summary.drawdownRange?.[1])}`],
     [t("averageNavShort"), `${fmtMultiple(summary.averageNavRange?.[0])} - ${fmtMultiple(summary.averageNavRange?.[1])}`],
   ];
@@ -4892,10 +4895,15 @@ function featuredOptimizerProfiles(profiles) {
   return featured.slice(0, 4);
 }
 
+function optimizerEquivalentCagr(profile) {
+  const metrics = profile?.metrics || {};
+  return Number(metrics.capitalEquivalentCagr ?? metrics.cagr);
+}
+
 function optimizerSortValue(profile, key) {
   const metrics = profile.metrics || {};
   if (key === "title") return profileTitle(profile);
-  if (key === "cagr") return Number(metrics.cagr ?? -Infinity);
+  if (key === "cagr") return optimizerEquivalentCagr(profile);
   if (key === "drawdown") return Number(metrics.maxDrawdown ?? -Infinity);
   if (key === "averageNav") return Number(metrics.averageNav ?? -Infinity);
   if (key === "sharpe") return Number(metrics.sharpe0 ?? -Infinity);
@@ -5022,7 +5030,7 @@ function optimizerMapMarkup() {
 
 function optimizerMapBaseDomain(valid) {
   const xs = valid.map((profile) => Math.abs(profile.metrics.maxDrawdown));
-  const ys = valid.map((profile) => profile.metrics.cagr);
+  const ys = valid.map(optimizerEquivalentCagr);
   const rawMinX = Math.min(...xs);
   const rawMaxX = Math.max(...xs);
   const rawMinY = Math.min(...ys);
@@ -5089,7 +5097,7 @@ function renderOptimizerMap(profiles) {
     return;
   }
   optimizerMapResizeObserver?.disconnect();
-  const valid = profiles.filter((profile) => Number.isFinite(profile.metrics?.cagr) && Number.isFinite(profile.metrics?.maxDrawdown));
+  const valid = profiles.filter((profile) => Number.isFinite(optimizerEquivalentCagr(profile)) && Number.isFinite(profile.metrics?.maxDrawdown));
   const base = valid.length ? optimizerMapBaseDomain(valid) : null;
   if (base) {
     state.optimizerMapView = state.optimizerMapView ? clampOptimizerMapView(state.optimizerMapView, base) : { ...base };
@@ -5172,7 +5180,7 @@ function renderOptimizerMap(profiles) {
     ctx.save();
     ctx.translate(15, pad.top + plotH / 2);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText(t("annualShort"), 0, 0);
+    ctx.fillText(t("equivalentAnnualShort"), 0, 0);
     ctx.restore();
 
     ctx.save();
@@ -5187,7 +5195,7 @@ function renderOptimizerMap(profiles) {
       const navRatio = maxNav === minNav ? 0.5 : (Number(profile.metrics.averageNav || minNav) - minNav) / (maxNav - minNav);
       const radius = 4 + navRatio * 4;
       const x = xFor(Math.abs(profile.metrics.maxDrawdown));
-      const y = yFor(profile.metrics.cagr);
+      const y = yFor(optimizerEquivalentCagr(profile));
       const highlighted = state.optimizerHighlightedKey === key;
       plottedPoints.push({ key, profile, x, y, radius });
       ctx.beginPath();
@@ -5218,7 +5226,7 @@ function renderOptimizerMap(profiles) {
 
     featuredOptimizerProfiles(valid).slice(0, 3).forEach((profile) => {
       const x = xFor(Math.abs(profile.metrics.maxDrawdown));
-      const y = yFor(profile.metrics.cagr);
+      const y = yFor(optimizerEquivalentCagr(profile));
       if (x < pad.left || x > width - pad.right || y < pad.top || y > height - pad.bottom) return;
       ctx.fillStyle = cssVar("--ink");
       ctx.font = "600 10px system-ui";
@@ -5413,6 +5421,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
     .map((profile) => {
       const index = state.optimizerProfiles.indexOf(profile);
       const m = profile.metrics;
+      const equivalentCagr = optimizerEquivalentCagr(profile);
       return `
         <article class="optimizer-feature-card">
           <div class="opt-head">
@@ -5422,7 +5431,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
           ${optimizerTagsMarkup(profile)}
           <div class="optimizer-reason">${escapeHtml(profile.rankReason || "")}</div>
           <div class="opt-grid">
-            <span>${escapeHtml(t("annualShort"))} ${escapeHtml(fmtPct(m.cagr))}</span>
+            <span>${escapeHtml(t("equivalentAnnualShort"))} ${escapeHtml(fmtPct(equivalentCagr))}</span>
             <span>${escapeHtml(t("drawdownShort"))} ${escapeHtml(fmtPct(m.maxDrawdown))}</span>
             <span>${escapeHtml(t("averageNavShort"))} ${escapeHtml(fmtMultiple(m.averageNav))}</span>
             <span>${escapeHtml(t("compositeShort"))} ${escapeHtml(fmtNum((profile.score?.composite || 0) * 100, 0))}</span>
@@ -5436,6 +5445,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
     .map((profile) => {
       const index = state.optimizerProfiles.indexOf(profile);
       const m = profile.metrics;
+      const equivalentCagr = optimizerEquivalentCagr(profile);
       const weightsText = weightsTextFromConfig(profile.assets || state.assets, profile.weights);
       const key = optimizerProfileKey(profile);
       const selected = state.optimizerSelectedKeys.includes(key);
@@ -5447,7 +5457,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
           <td><strong>${escapeHtml(profileTitle(profile))}</strong>${optimizerTagsMarkup(profile)}<span>${escapeHtml(profile.rankReason || "")}</span></td>
           <td>${escapeHtml(weightsText)}</td>
           <td>${escapeHtml(portfolioRuleLabel(profile.rebalance, profile.cashflow))}</td>
-          <td>${escapeHtml(fmtPct(m.cagr))}</td>
+          <td>${escapeHtml(fmtPct(equivalentCagr))}</td>
           <td>${escapeHtml(fmtPct(m.maxDrawdown))}</td>
           <td>${escapeHtml(fmtMultiple(m.averageNav))}</td>
           <td>${escapeHtml(fmtNum(m.sharpe0))}</td>
@@ -5496,7 +5506,7 @@ function renderOptimizer(profiles, summary = state.optimizerSummary) {
                   <th>${optimizerSortButton("title", t("portfolio"))}</th>
                   <th>${escapeHtml(t("weights"))}</th>
                   <th>${optimizerSortButton("rebalance", t("rebalance"))}</th>
-                  <th>${optimizerSortButton("cagr", t("annualShort"))}</th>
+                  <th>${optimizerSortButton("cagr", t("equivalentAnnualShort"))}</th>
                   <th>${optimizerSortButton("drawdown", t("drawdownShort"))}</th>
                   <th>${optimizerSortButton("averageNav", t("averageNavShort"))}</th>
                   <th>${optimizerSortButton("sharpe", t("sharpeShort"))}</th>

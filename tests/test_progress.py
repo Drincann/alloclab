@@ -56,6 +56,7 @@ class ScanEquivalenceTests(unittest.TestCase):
             "rebalanceCount",
             "cashflowCount",
             "cashflowTotal",
+            "capitalEquivalentCagr",
         ]
         cases = [
             ({"mode": "none", "threshold": 0.1}, {"mode": "none", "contributionRate": 0}),
@@ -176,6 +177,7 @@ class ScanEquivalenceTests(unittest.TestCase):
             "rebalanceCount",
             "cashflowCount",
             "cashflowTotal",
+            "capitalEquivalentCagr",
         ]
         for python_row, numpy_row in zip(python_result[2], numpy_result[2]):
             self.assertEqual(python_row[:3], numpy_row[:3])
@@ -269,6 +271,12 @@ class ProgressTests(unittest.TestCase):
         values = [event[0] for event in progress_events]
         stages = {event[1] for event in progress_events}
         self.assertTrue(result["profiles"])
+        self.assertIn("equivalentCagrRange", result["summary"])
+        for profile in result["profiles"]:
+            self.assertAlmostEqual(
+                profile["score"]["annualized"],
+                profile["metrics"]["capitalEquivalentCagr"],
+            )
         self.assertEqual(values, sorted(values))
         self.assertIn("scan", stages)
         self.assertIn("score", stages)
