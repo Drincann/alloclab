@@ -394,6 +394,10 @@ const I18N = {
     capitalEquivalentCagrShort: "总本金等效年化",
     lumpSumDifferenceShort: "相对一次性投入",
     moneyWeightedCagrShort: "资金加权年化 (XIRR)",
+    investmentOutcomeGroup: "投资结果",
+    returnMetricsGroup: "收益口径",
+    performanceGroup: "收益表现",
+    riskMetricsGroup: "风险与统计",
     investedCapitalShort: "累计投入",
     terminalValueShort: "期末资产",
     netProfitShort: "净盈利",
@@ -653,6 +657,10 @@ const I18N = {
     capitalEquivalentCagrShort: "Total-capital CAGR",
     lumpSumDifferenceShort: "Vs lump sum",
     moneyWeightedCagrShort: "Money-weighted (XIRR)",
+    investmentOutcomeGroup: "Investment outcome",
+    returnMetricsGroup: "Return measures",
+    performanceGroup: "Performance",
+    riskMetricsGroup: "Risk and statistics",
     investedCapitalShort: "Capital invested",
     terminalValueShort: "Ending assets",
     netProfitShort: "Net profit",
@@ -2827,6 +2835,7 @@ function optimizerRequestOptions() {
 
 function setStatus(text, isError = false) {
   if (!state.result) {
+    els.metricsGrid.classList.remove("grouped");
     els.metricsGrid.innerHTML = `<div class="status ${isError ? "error" : ""}">${text}</div>`;
   }
 }
@@ -2979,6 +2988,7 @@ function renderBacktestError(error) {
   els.tooltip.style.display = "none";
   clearChartLegend();
   drawChartMessage(title, [detail, hint].filter(Boolean), true);
+  els.metricsGrid.classList.remove("grouped");
   els.metricsGrid.innerHTML = `
     <div class="status error backtest-error">
       <strong>${escapeHtml(title)}</strong>
@@ -3255,9 +3265,11 @@ function renderMetrics() {
     : fmtPct((withdrawal4.terminal ?? 1) - 1);
   const withdrawal4CagrClass = withdrawalDepleted || (withdrawal4.cagr ?? 0) < 0 ? "negative" : "positive";
   const withdrawal4ReturnClass = withdrawalDepleted || ((withdrawal4.terminal ?? 1) - 1) < 0 ? "negative" : "positive";
-  const cards = [
+  const performanceCards = [
     [investor.hasCashflow ? t("strategyCagrShort") : t("cagr"), fmtPct(m.cagr), m.cagr >= 0 ? "positive" : "negative", t(investor.hasCashflow ? "strategyCagrHelp" : "cagrHelp"), investor.hasCashflow ? "" : withdrawal4CagrText, withdrawal4CagrClass],
     [investor.hasCashflow ? t("strategyTotalReturnShort") : t("totalReturn"), fmtPct(m.totalReturn), m.totalReturn >= 0 ? "positive" : "negative", t(investor.hasCashflow ? "strategyTotalReturnHelp" : "totalReturnHelp"), investor.hasCashflow ? "" : withdrawal4ReturnText, withdrawal4ReturnClass],
+  ];
+  const riskCards = [
     [t("maxDrawdown"), fmtPct(m.maxDrawdown), "negative", t("maxDrawdownHelp")],
     [t("volatility"), fmtPct(m.volatility), "", t("volatilityHelp")],
     [t("sharpe"), fmtNum(m.sharpe0), "", t("sharpeHelp")],
@@ -3269,20 +3281,27 @@ function renderMetrics() {
     [t("years"), fmtNum(m.years, 1), "", t("yearsHelp")],
     [t("rebalanceCount"), String(m.rebalanceCount), "", t("rebalanceCountHelp")],
   ];
-  if (investor.hasCashflow) {
-    cards.unshift(
-      [t("capitalEquivalentCagrShort"), fmtOptionalPct(investor.capitalEquivalentCagr), metricSignClass(investor.capitalEquivalentCagr), t("capitalEquivalentCagrHelp")],
-      [t("lumpSumDifferenceShort"), fmtOptionalPct(investor.lumpSumDifference), metricSignClass(investor.lumpSumDifference), t("lumpSumDifferenceHelp")],
-      [t("moneyWeightedCagrShort"), fmtOptionalPct(investor.moneyWeightedReturn), metricSignClass(investor.moneyWeightedReturn), t("moneyWeightedCagrHelp")],
-      [t("investedCapitalShort"), fmtOptionalMultiple(investor.investedCapital), "", t("investedCapitalHelp")],
-      [t("terminalValueShort"), fmtOptionalMultiple(investor.terminalValue), "", t("terminalValueHelp")],
-      [t("netProfitShort"), fmtOptionalMultiple(investor.netProfit), metricSignClass(investor.netProfit), t("netProfitHelp")],
-      [t("netProfitRateShort"), fmtOptionalPct(investor.netProfitRate), metricSignClass(investor.netProfitRate), t("netProfitRateHelp")],
-    );
-  }
-  els.metricsGrid.innerHTML = cards
-    .map(
-      ([label, value, klass, help, withdrawalValue, withdrawalKlass]) => `
+  const groups = investor.hasCashflow
+    ? [
+      [t("investmentOutcomeGroup"), [
+        [t("investedCapitalShort"), fmtOptionalMultiple(investor.investedCapital), "", t("investedCapitalHelp")],
+        [t("terminalValueShort"), fmtOptionalMultiple(investor.terminalValue), "", t("terminalValueHelp")],
+        [t("netProfitShort"), fmtOptionalMultiple(investor.netProfit), metricSignClass(investor.netProfit), t("netProfitHelp")],
+        [t("netProfitRateShort"), fmtOptionalPct(investor.netProfitRate), metricSignClass(investor.netProfitRate), t("netProfitRateHelp")],
+      ]],
+      [t("returnMetricsGroup"), [
+        [t("capitalEquivalentCagrShort"), fmtOptionalPct(investor.capitalEquivalentCagr), metricSignClass(investor.capitalEquivalentCagr), t("capitalEquivalentCagrHelp")],
+        [t("lumpSumDifferenceShort"), fmtOptionalPct(investor.lumpSumDifference), metricSignClass(investor.lumpSumDifference), t("lumpSumDifferenceHelp")],
+        [t("moneyWeightedCagrShort"), fmtOptionalPct(investor.moneyWeightedReturn), metricSignClass(investor.moneyWeightedReturn), t("moneyWeightedCagrHelp")],
+        ...performanceCards,
+      ]],
+      [t("riskMetricsGroup"), riskCards],
+    ]
+    : [
+      [t("performanceGroup"), performanceCards],
+      [t("riskMetricsGroup"), riskCards],
+    ];
+  const cardMarkup = ([label, value, klass, help, withdrawalValue, withdrawalKlass]) => `
         <div class="metric-card ${klass}">
           <div class="metric-label">
             <span>${escapeHtml(label)}</span>
@@ -3291,8 +3310,15 @@ function renderMetrics() {
           <strong>${value}</strong>
           ${withdrawalValue ? `<div class="metric-sub"><span>${escapeHtml(t("withdrawal4Short"))}</span><b class="${escapeHtml(withdrawalKlass)}">${escapeHtml(withdrawalValue)}</b></div>` : ""}
         </div>
-      `,
-    )
+      `;
+  els.metricsGrid.classList.add("grouped");
+  els.metricsGrid.innerHTML = groups
+    .map(([title, cards]) => `
+      <section class="metric-group">
+        <h3 class="metric-group-title">${escapeHtml(title)}</h3>
+        ${cards.map(cardMarkup).join("")}
+      </section>
+    `)
     .join("");
   const rangeText = m.start && m.end ? `${m.start} ${t("to")} ${m.end}` : shareDateText(state.shareView.portfolio || {});
   const drawdownRangeText = m.drawdownPeak && m.drawdownTrough
@@ -3995,15 +4021,15 @@ function renderComparisonPanel(message = "") {
            <button type="button" data-action="edit" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("edit"))}</button>
            <button type="button" data-action="remove" data-key="${escapeHtml(entry.key)}">${escapeHtml(t("remove"))}</button>`;
       const metricCells = showInvestorColumns
-        ? `<td>${escapeHtml(fmtOptionalPct(investor.capitalEquivalentCagr))}</td>
+        ? `<td>${escapeHtml(fmtOptionalMultiple(investor.investedCapital))}</td>
+          <td>${escapeHtml(fmtOptionalMultiple(investor.terminalValue))}</td>
+          <td>${escapeHtml(fmtOptionalMultiple(investor.netProfit))}</td>
+          <td>${escapeHtml(fmtOptionalPct(investor.netProfitRate))}</td>
+          <td>${escapeHtml(fmtOptionalPct(investor.capitalEquivalentCagr))}</td>
           <td>${escapeHtml(fmtOptionalPct(investor.lumpSumDifference))}</td>
           <td>${escapeHtml(fmtOptionalPct(investor.moneyWeightedReturn))}</td>
           <td>${escapeHtml(fmtPct(metrics.cagr))}</td>
-          <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
-          <td>${escapeHtml(fmtOptionalMultiple(investor.investedCapital))}</td>
-          <td>${escapeHtml(fmtOptionalMultiple(investor.terminalValue))}</td>
-          <td>${escapeHtml(fmtOptionalMultiple(investor.netProfit))}</td>
-          <td>${escapeHtml(fmtOptionalPct(investor.netProfitRate))}</td>`
+          <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>`
         : `<td>${escapeHtml(fmtPct(metrics.cagr))}</td>
           <td>${escapeHtml(fmtNum(metrics.sharpe0))}</td>
           <td>${escapeHtml(fmtPct(metrics.maxDrawdown))}</td>
@@ -4040,15 +4066,15 @@ function renderComparisonPanel(message = "") {
             <th><button type="button" data-sort="portfolio">${escapeHtml(t("portfolio"))}${escapeHtml(comparisonSortIndicator("portfolio"))}</button></th>
             <th><button type="button" data-sort="rebalance">${escapeHtml(t("rebalance"))}${escapeHtml(comparisonSortIndicator("rebalance"))}</button></th>
             ${showInvestorColumns
-              ? `<th><button type="button" data-sort="capitalEquivalent">${escapeHtml(t("capitalEquivalentCagrShort"))}${escapeHtml(comparisonSortIndicator("capitalEquivalent"))}</button></th>
+              ? `<th><button type="button" data-sort="investedCapital">${escapeHtml(t("investedCapitalShort"))}${escapeHtml(comparisonSortIndicator("investedCapital"))}</button></th>
+                <th><button type="button" data-sort="terminalValue">${escapeHtml(t("terminalValueShort"))}${escapeHtml(comparisonSortIndicator("terminalValue"))}</button></th>
+                <th><button type="button" data-sort="netProfit">${escapeHtml(t("netProfitShort"))}${escapeHtml(comparisonSortIndicator("netProfit"))}</button></th>
+                <th><button type="button" data-sort="netProfitRate">${escapeHtml(t("netProfitRateShort"))}${escapeHtml(comparisonSortIndicator("netProfitRate"))}</button></th>
+                <th><button type="button" data-sort="capitalEquivalent">${escapeHtml(t("capitalEquivalentCagrShort"))}${escapeHtml(comparisonSortIndicator("capitalEquivalent"))}</button></th>
                 <th><button type="button" data-sort="lumpSumDifference">${escapeHtml(t("lumpSumDifferenceShort"))}${escapeHtml(comparisonSortIndicator("lumpSumDifference"))}</button></th>
                 <th><button type="button" data-sort="moneyWeighted">${escapeHtml(t("moneyWeightedCagrShort"))}${escapeHtml(comparisonSortIndicator("moneyWeighted"))}</button></th>
                 <th><button type="button" data-sort="cagr">${escapeHtml(t("strategyCagrShort"))}${escapeHtml(comparisonSortIndicator("cagr"))}</button></th>
-                <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>
-                <th><button type="button" data-sort="investedCapital">${escapeHtml(t("investedCapitalShort"))}${escapeHtml(comparisonSortIndicator("investedCapital"))}</button></th>
-                <th><button type="button" data-sort="terminalValue">${escapeHtml(t("terminalValueShort"))}${escapeHtml(comparisonSortIndicator("terminalValue"))}</button></th>
-                <th><button type="button" data-sort="netProfit">${escapeHtml(t("netProfitShort"))}${escapeHtml(comparisonSortIndicator("netProfit"))}</button></th>
-                <th><button type="button" data-sort="netProfitRate">${escapeHtml(t("netProfitRateShort"))}${escapeHtml(comparisonSortIndicator("netProfitRate"))}</button></th>`
+                <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>`
               : `<th><button type="button" data-sort="cagr">${escapeHtml(t("annualShort"))}${escapeHtml(comparisonSortIndicator("cagr"))}</button></th>
                 <th><button type="button" data-sort="sharpe">${escapeHtml(t("sharpeShort"))}${escapeHtml(comparisonSortIndicator("sharpe"))}</button></th>
                 <th><button type="button" data-sort="drawdown">${escapeHtml(t("drawdownShort"))}${escapeHtml(comparisonSortIndicator("drawdown"))}</button></th>
